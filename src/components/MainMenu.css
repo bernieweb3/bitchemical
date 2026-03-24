@@ -411,7 +411,7 @@
 
 .mode-grid {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
 }
 
@@ -513,6 +513,10 @@
 
 .mode-squad {
     background: linear-gradient(160deg, #ff5e5e, #c42f44);
+}
+
+.mode-raid {
+    background: linear-gradient(160deg, #7c4dff, #4c1d95);
 }
 
 .vip-banner {

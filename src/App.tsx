@@ -3,10 +3,13 @@ import { MainMenu } from './components/MainMenu';
 import { GameCanvas } from './components/GameCanvas';
 import { GameOverScreen } from './components/GameOverScreen';
 import { ElementLoadoutScreen } from './components/ElementLoadoutScreen.tsx';
+import { MatchmakingScreen, type MatchFoundPayload } from './components/MatchmakingScreen';
 import type { SelectedLoadoutItem } from './components/ElementLoadoutScreen.tsx';
+import { isMultiplayerMode, type GameMode } from './types/gameMode';
 import './App.css';
+import './components/MatchmakingScreen.css';
 
-type Screen = 'menu' | 'loadout' | 'game' | 'gameover';
+type Screen = 'menu' | 'loadout' | 'matchmaking' | 'game' | 'gameover';
 
 interface GameResult {
     winner: string;
@@ -21,9 +24,18 @@ function App() {
     const [selectedElements, setSelectedElements] = useState<string[]>(['K', 'Fe', 'Br']);
     const [selectedElementImageUrls, setSelectedElementImageUrls] = useState<Record<string, string>>({});
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [selectedMode, setSelectedMode] = useState<GameMode>('vs-ai');
+    const [playerNickname] = useState(`Player${Math.floor(1000 + Math.random() * 9000)}`);
+    const [matchedRoom, setMatchedRoom] = useState<MatchFoundPayload | null>(null);
 
-    const handleStartGame = useCallback(() => {
-        setScreen('loadout');
+    const handleStartGame = useCallback((mode: GameMode) => {
+        setSelectedMode(mode);
+        if (mode === 'vs-ai') {
+            setMatchedRoom(null);
+            setScreen('loadout');
+            return;
+        }
+        setScreen('matchmaking');
     }, []);
 
     const handleStartWithLoadout = useCallback((elements: SelectedLoadoutItem[]) => {
@@ -40,6 +52,11 @@ function App() {
         setScreen('game');
     }, []);
 
+    const handleMatched = useCallback((payload: MatchFoundPayload) => {
+        setMatchedRoom(payload);
+        setScreen('loadout');
+    }, []);
+
     const handleGameOver = useCallback((winner: string, playerHp: number, aiHp: number) => {
         setGameResult({ winner, playerHp, aiHp });
         // Short delay before showing game over screen
@@ -47,11 +64,18 @@ function App() {
     }, []);
 
     const handlePlayAgain = useCallback(() => {
+        if (isMultiplayerMode(selectedMode)) {
+            setMatchedRoom(null);
+            setScreen('matchmaking');
+            return;
+        }
         setGameKey((k) => k + 1);
         setScreen('game');
-    }, []);
+    }, [selectedMode]);
 
     const handleMainMenu = useCallback(() => {
+        setMatchedRoom(null);
+        setSelectedMode('vs-ai');
         setScreen('menu');
     }, []);
 
@@ -70,6 +94,7 @@ function App() {
     }, []);
 
     const handleExitGame = useCallback(() => {
+        setMatchedRoom(null);
         setScreen('menu');
     }, []);
 
@@ -88,7 +113,15 @@ function App() {
             {screen === 'loadout' && (
                 <ElementLoadoutScreen
                     onStartGame={handleStartWithLoadout}
+                    onBack={() => setScreen(isMultiplayerMode(selectedMode) ? 'matchmaking' : 'menu')}
+                />
+            )}
+            {screen === 'matchmaking' && selectedMode !== 'vs-ai' && (
+                <MatchmakingScreen
+                    mode={selectedMode}
+                    nickname={playerNickname}
                     onBack={() => setScreen('menu')}
+                    onMatched={handleMatched}
                 />
             )}
             {screen === 'game' && (
@@ -106,6 +139,8 @@ function App() {
                         onGameOver={handleGameOver}
                         selectedElements={selectedElements}
                         selectedElementImageUrls={selectedElementImageUrls}
+                        gameMode={selectedMode}
+                        multiplayerMatch={isMultiplayerMode(selectedMode) ? matchedRoom : null}
                         fullViewport
                     />
                 </div>

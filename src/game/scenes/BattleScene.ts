@@ -73,9 +73,17 @@ interface ParticleState {
     decay: number;
 }
 
+interface CharacterHitbox {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
 // ─── BattleScene ──────────────────────────────────────────────
 export class BattleScene extends Phaser.Scene {
     private readonly projectileDisplaySize = 44;
+    private readonly blockDamage = 30;
 
     private player!: CharacterState;
     private ai!: CharacterState;
@@ -617,6 +625,20 @@ export class BattleScene extends Phaser.Scene {
         });
     }
 
+    private getCharacterHitbox(c: CharacterState): CharacterHitbox {
+        const baseX = c.x + c.width / 2;
+        const baseY = c.y + c.height + 2;
+        const hitboxWidth = 52;
+        const hitboxHeight = c.crouching ? 92 : 102;
+
+        return {
+            x: baseX - hitboxWidth / 2,
+            y: baseY - hitboxHeight,
+            width: hitboxWidth,
+            height: hitboxHeight,
+        };
+    }
+
     private getGunMuzzlePosition(c: CharacterState) {
         const spriteX = c.x + c.width / 2;
         const spriteBaseY = c.y + c.height + 2;
@@ -691,7 +713,7 @@ export class BattleScene extends Phaser.Scene {
                 if (p.x > b.x && p.x < b.x + BLOCK_SIZE && p.y > b.y && p.y < b.y + BLOCK_SIZE) {
                     p.active = false;
                     p.sprite?.destroy();
-                    b.hp -= DAMAGE;
+                    b.hp -= this.blockDamage;
                     this.spawnProjectileImpactEffect(p.x, p.y, p);
                     this.spawnParticles(p.x, p.y, ELEMENTS[b.element].color);
                     if (b.hp <= 0) {
@@ -705,7 +727,8 @@ export class BattleScene extends Phaser.Scene {
 
             // Character collision
             const target = p.isPlayerProjectile ? this.ai : this.player;
-            if (p.x > target.x && p.x < target.x + target.width && p.y > target.y && p.y < target.y + target.height) {
+            const hitbox = this.getCharacterHitbox(target);
+            if (p.x > hitbox.x && p.x < hitbox.x + hitbox.width && p.y > hitbox.y && p.y < hitbox.y + hitbox.height) {
                 this.takeDamage(target, DAMAGE);
                 p.active = false;
                 p.sprite?.destroy();
@@ -878,16 +901,17 @@ export class BattleScene extends Phaser.Scene {
 
         if (a.aiShootTimer > cd) {
             let bestAngle = 45, bestScore = -Infinity, foundHit = false;
+            const playerHitbox = this.getCharacterHitbox(this.player);
             const preds = [
-                { x: this.player.x, y: this.player.y },
-                { x: this.player.x + avgVx * 12, y: Math.min(this.player.y, GROUND_Y - 60) },
+                { x: playerHitbox.x, y: playerHitbox.y },
+                { x: playerHitbox.x + avgVx * 12, y: Math.min(playerHitbox.y, GROUND_Y - 60) },
             ];
             for (let ang = 15; ang <= 75; ang += 2) {
                 for (const pr of preds) {
                     const px = Math.max(0, Math.min(LEFT_ZONE_WIDTH - 40, pr.x));
                     const py = Math.max(100, Math.min(GROUND_Y - 60, pr.y));
                     const aiMuzzle = this.getGunMuzzlePosition(a);
-                    const r = this.simShot(aiMuzzle.x, aiMuzzle.y, ang, px, py, this.player.width, this.player.height);
+                    const r = this.simShot(aiMuzzle.x, aiMuzzle.y, ang, px, py, playerHitbox.width, playerHitbox.height);
                     if (r.hit) {
                         const s = 1000 - r.frame;
                         if (s > bestScore) { bestScore = s; bestAngle = ang; foundHit = true; }
@@ -1008,6 +1032,22 @@ export class BattleScene extends Phaser.Scene {
             g.fillRect(b.x, b.y, BLOCK_SIZE, BLOCK_SIZE);
             g.lineStyle(2, hpR > 0.5 ? 0xffffff : 0xff0000, hpR > 0.5 ? 0.25 : 0.5);
             g.strokeRect(b.x, b.y, BLOCK_SIZE, BLOCK_SIZE);
+
+            // Tiny HP bar to make block damage readable during combat.
+            g.fillStyle(0x111111, 0.75);
+            g.fillRect(b.x + 3, b.y + 3, BLOCK_SIZE - 6, 4);
+            g.fillStyle(hpR > 0.5 ? 0x4caf50 : hpR > 0.25 ? 0xffc107 : 0xf44336, 0.95);
+            g.fillRect(b.x + 3, b.y + 3, (BLOCK_SIZE - 6) * Phaser.Math.Clamp(hpR, 0, 1), 4);
+
+            if (hpR < 0.66) {
+                g.lineStyle(1, 0xffffff, 0.28);
+                g.lineBetween(b.x + 8, b.y + 10, b.x + 16, b.y + 18);
+            }
+            if (hpR < 0.33) {
+                g.lineStyle(1, 0xffffff, 0.35);
+                g.lineBetween(b.x + 20, b.y + 8, b.x + 12, b.y + 22);
+                g.lineBetween(b.x + 7, b.y + 23, b.x + 25, b.y + 13);
+            }
         }
         // Block element text rendered separately via dynamic text
         // (kept simple - blocks show via color)

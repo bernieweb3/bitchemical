@@ -1,0 +1,134 @@
+.matchmaking-root {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: radial-gradient(circle at 20% 20%, #1f2a44 0%, #0b1220 50%, #060a14 100%);
+}
+
+.matchmaking-card {
+    width: min(540px, 92vw);
+    padding: 28px;
+    border-radius: 20px;
+    background: rgba(15, 21, 36, 0.92);
+    border: 1px solid rgba(147, 197, 253, 0.35);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.45);
+    color: #e5ecff;
+    text-align: center;
+}
+
+.matchmaking-card h2 {
+    margin: 0 0 14px;
+    font-size: 32px;
+}
+
+.matchmaking-card p {
+    margin: 8px 0;
+}
+
+.matchmaking-card .meta {
+    color: #9fb2d9;
+}
+
+.matchmaking-card .hint {
+    color: #7dd3fc;
+    margin-top: 14px;
+}
+
+.match-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.tab-btn {
+    flex: 1;
+    border: 1px solid rgba(147, 197, 253, 0.35);
+    border-radius: 10px;
+    padding: 8px 10px;
+    background: rgba(30, 41, 59, 0.7);
+    color: #c7dbff;
+    cursor: pointer;
+}
+
+.tab-btn.active {
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    color: #ffffff;
+}
+
+.room-panel {
+    border: 1px solid rgba(147, 197, 253, 0.25);
+    border-radius: 12px;
+    margin-top: 10px;
+    padding: 12px;
+    text-align: left;
+}
+
+.join-row {
+    margin-top: 10px;
+    display: flex;
+    gap: 8px;
+}
+
+.room-input {
+    flex: 1;
+    border-radius: 10px;
+    border: 1px solid rgba(147, 197, 253, 0.35);
+    padding: 9px 10px;
+    color: #e5ecff;
+    background: rgba(15, 21, 36, 0.88);
+}
+
+.action-btn {
+    border: 0;
+    border-radius: 10px;
+    padding: 9px 14px;
+    font-size: 14px;
+    color: #e5ecff;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    cursor: pointer;
+}
+
+.action-btn.secondary {
+    background: linear-gradient(135deg, #334155, #1f2937);
+}
+
+.action-btn.danger {
+    background: linear-gradient(135deg, #dc2626, #991b1b);
+}
+
+.action-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.member-list {
+    margin: 8px 0;
+    padding-left: 16px;
+    color: #b8cdf5;
+}
+
+.member-list li {
+    margin: 4px 0;
+}
+
+.room-actions {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.back-btn {
+    margin-top: 18px;
+    border: 0;
+    border-radius: 10px;
+    padding: 10px 18px;
+    font-size: 16px;
+    color: #e5ecff;
+    background: linear-gradient(135deg, #2563eb, #1d4ed8);
+    cursor: pointer;
+}
+
+.back-btn:hover {
+    filter: brightness(1.08);
+}

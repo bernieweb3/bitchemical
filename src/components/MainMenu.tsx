@@ -1,14 +1,17 @@
+import type { GameMode } from '../types/gameMode';
+
 interface MainMenuProps {
-    onStartGame: () => void;
+    onStartGame: (mode: GameMode) => void;
 }
 
 import './MainMenu.css';
 
 export function MainMenu({ onStartGame }: MainMenuProps) {
     const gameModes = [
-        { name: 'Solo', accent: 'mode-solo', note: '1 v 1 tactical duel', icon: '🧑', badge: 'S' },
-        { name: 'Duo', accent: 'mode-duo', note: '2 pilots, one drop', icon: '👫', badge: 'D' },
-        { name: 'Squad', accent: 'mode-squad', note: '4-player blitz battle', icon: '🧑‍🤝‍🧑', badge: 'Q' },
+        { mode: 'vs-ai' as const, name: 'Choi voi may', accent: 'mode-solo', note: '1vAI tactical duel', icon: '🤖', badge: 'AI' },
+        { mode: 'pvp-1v1' as const, name: 'PVP 1v1', accent: 'mode-duo', note: 'Dau 1 doi 1 real-time', icon: '⚔', badge: '1V1' },
+        { mode: 'pvp-2v2' as const, name: 'PVP 2v2', accent: 'mode-squad', note: 'Doi hinh 2 nguoi moi ben', icon: '👥', badge: '2V2' },
+        { mode: 'pvp-3v3' as const, name: 'PVP 3v3', accent: 'mode-raid', note: 'Tran chien 6 nguoi real-time', icon: '🛡', badge: '3V3' },
     ];
 
     const railItems = [
@@ -81,7 +84,7 @@ export function MainMenu({ onStartGame }: MainMenuProps) {
                     <div className="mode-heading">Choose a Game Mode</div>
                     <div className="mode-grid">
                         {gameModes.map((mode) => (
-                            <button key={mode.name} className={`mode-card ${mode.accent}`} onClick={onStartGame}>
+                            <button key={mode.name} className={`mode-card ${mode.accent}`} onClick={() => onStartGame(mode.mode)}>
                                 <div className="mode-icon-wrap">
                                     <div className="mode-icon-badge">{mode.badge}</div>
                                     <div className="mode-icon">{mode.icon}</div>
@@ -95,7 +98,7 @@ export function MainMenu({ onStartGame }: MainMenuProps) {
                         ))}
                     </div>
 
-                    <button className="vip-banner" onClick={onStartGame}>
+                    <button className="vip-banner" onClick={() => onStartGame('pvp-3v3')}>
                         <div className="vip-glow" />
                         <div className="vip-left">
                             <div className="vip-icon">🌟</div>
