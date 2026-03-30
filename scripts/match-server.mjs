@@ -5,8 +5,6 @@ const PORT = Number(process.env.PORT || 3001);
 
 const MODE_SIZE = {
     'pvp-1v1': 2,
-    'pvp-2v2': 4,
-    'pvp-3v3': 6,
 };
 
 const ARENA = {
@@ -192,9 +190,16 @@ const io = new Server(httpServer, {
 
 const queues = {
     'pvp-1v1': [],
-    'pvp-2v2': [],
-    'pvp-3v3': [],
 };
+
+function upsertQueueEntry(mode, socketId) {
+    const queue = queues[mode];
+    const idx = queue.findIndex((entry) => entry.socketId === socketId);
+    if (idx >= 0) {
+        return;
+    }
+    queue.push({ socketId });
+}
 
 const rooms = new Map();
 const customRooms = new Map();
@@ -280,6 +285,9 @@ function spawnPoint(team, slot, mode) {
 
 function createRoom(mode, sockets) {
     const roomId = `room_${mode}_${Date.now()}_${Math.floor(Math.random() * 9999)}`;
+    const required = MODE_SIZE[mode];
+    const participants = sockets.slice(0, required);
+
     const room = {
         roomId,
         mode,
@@ -290,7 +298,7 @@ function createRoom(mode, sockets) {
         blocks: [],
     };
 
-    sockets.forEach((socketId, idx) => {
+    participants.forEach((socketId, idx) => {
         const socket = io.sockets.sockets.get(socketId);
         if (!socket) return;
 
@@ -351,6 +359,7 @@ function createRoom(mode, sockets) {
     }));
 
     for (const player of room.players.values()) {
+        if (player.isBot) continue;
         io.to(player.id).emit('match_found', {
             roomId,
             mode,
@@ -361,6 +370,65 @@ function createRoom(mode, sockets) {
     }
 }
 
+function updateBotInput(room, player, dtMs) {
+    if (!player.isBot || !player.alive) return;
+
+    const enemy = getNearestEnemy(room.players, player);
+    if (!enemy) return;
+
+    const centerX = player.x + player.w / 2;
+    const centerY = player.y + player.h / 2;
+    const enemyX = enemy.x + enemy.w / 2;
+    const enemyY = enemy.y + enemy.h / 2;
+    const dx = enemyX - centerX;
+    const dy = enemyY - centerY;
+    const absDx = Math.abs(dx);
+
+    player.input.left = false;
+    player.input.right = false;
+    player.input.down = false;
+    player.input.up = false;
+
+    // Keep spacing like duel AI: approach from far, retreat when too close.
+    if (absDx > 260) {
+        player.input.right = dx > 0;
+        player.input.left = dx < 0;
+    } else if (absDx < 130) {
+        player.input.right = dx < 0;
+        player.input.left = dx > 0;
+    } else {
+        player.input.down = Math.random() < 0.15;
+    }
+
+    // Simple jump logic to contest high ground.
+    if (player.onGround && enemy.y + enemy.h < player.y + player.h - 28 && absDx < 240 && Math.random() < 0.08) {
+        player.input.up = true;
+    }
+
+    player.input.aimX = enemyX + (enemy.vx ?? 0) * 0.12;
+    player.input.aimY = enemyY + dy * 0.1;
+
+    player.aiShootTimer += dtMs;
+    const shootWindowMs = player.mana >= SHOT_COST_MANA ? 340 : 700;
+    if (player.aiShootTimer >= shootWindowMs) {
+        player.input.shoot = true;
+        player.aiShootTimer = 0;
+    }
+
+    player.aiTimer += dtMs;
+    if (player.aiTimer >= 900) {
+        player.aiTimer = 0;
+        const pick = player.selectedElements[Math.floor(Math.random() * player.selectedElements.length)] ?? player.selectedElement;
+        player.selectedElement = pick;
+        player.input.selectedElement = pick;
+
+        const inv = player.inventory[pick] ?? 0;
+        if (player.mana >= BLOCK_COST_MANA && inv > 0 && Math.random() < 0.22) {
+            player.input.build = true;
+        }
+    }
+}
+
 function updateRoom(room, dtMs) {
     if (room.over) return;
 
@@ -368,6 +436,10 @@ function updateRoom(room, dtMs) {
 
     for (const p of room.players.values()) {
         if (!p.alive) continue;
+
+        if (p.isBot) {
+            updateBotInput(room, p, dtMs);
+        }
 
         p.mana = Math.min(MAX_MANA, p.mana + MANA_REGEN_PER_SECOND * (dtMs / 1000));
         p.crouching = Boolean(p.input.down);
@@ -640,25 +712,36 @@ function updateRoom(room, dtMs) {
 }
 
 function trimQueue(mode) {
-    queues[mode] = queues[mode].filter((socketId) => io.sockets.sockets.has(socketId));
+    queues[mode] = queues[mode].filter((entry) => io.sockets.sockets.has(entry.socketId));
 }
 
 function tryMatch(mode) {
     trimQueue(mode);
     const required = MODE_SIZE[mode];
     while (queues[mode].length >= required) {
-        const sockets = queues[mode].splice(0, required);
+        const entries = queues[mode].splice(0, required);
+        const sockets = entries.map((entry) => entry.socketId);
         createRoom(mode, sockets);
     }
 
     io.emit('queue_update', { mode, count: queues[mode].length });
 }
 
-function removeSocketFromQueues(socketId) {
+function removeQueueEntriesBySocket(socketId) {
     for (const m of Object.keys(queues)) {
-        queues[m] = queues[m].filter((id) => id !== socketId);
+        queues[m] = queues[m].filter((entry) => entry.socketId !== socketId);
+    }
+}
+
+function emitQueueCounts() {
+    for (const m of Object.keys(queues)) {
         io.emit('queue_update', { mode: m, count: queues[m].length });
     }
+}
+
+function removeSocketFromQueues(socketId) {
+    removeQueueEntriesBySocket(socketId);
+    emitQueueCounts();
 }
 
 function startCustomRoomMatch(roomCode, starterId) {
@@ -675,7 +758,7 @@ function startCustomRoomMatch(roomCode, starterId) {
 
     const required = MODE_SIZE[room.mode];
     if (room.members.length < required) {
-        io.to(starterId).emit('room_error', { message: `Can it nhat ${required} nguoi de bat dau.` });
+        io.to(starterId).emit('room_error', { message: `Can du ${required} nguoi de bat dau phong nay.` });
         return;
     }
 
@@ -687,7 +770,7 @@ function startCustomRoomMatch(roomCode, starterId) {
         if (memberSocket) delete memberSocket.data.customRoomCode;
     }
 
-    createRoom(room.mode, room.members.slice(0, required));
+    createRoom(room.mode, room.members);
 }
 
 io.on('connection', (socket) => {
@@ -696,18 +779,17 @@ io.on('connection', (socket) => {
         socket.data.nickname = String(nickname || '').slice(0, 24) || `Player-${socket.id.slice(0, 4)}`;
 
         leaveCustomRoomBySocketId(socket.id);
-        removeSocketFromQueues(socket.id);
+        removeQueueEntriesBySocket(socket.id);
+        emitQueueCounts();
 
-        if (!queues[mode].includes(socket.id)) {
-            queues[mode].push(socket.id);
-        }
+        upsertQueueEntry(mode, socket.id);
 
         tryMatch(mode);
     });
 
     socket.on('leave_queue', ({ mode }) => {
         if (!mode || !queues[mode]) return;
-        queues[mode] = queues[mode].filter((id) => id !== socket.id);
+        queues[mode] = queues[mode].filter((entry) => entry.socketId !== socket.id);
         io.emit('queue_update', { mode, count: queues[mode].length });
     });
 
@@ -797,7 +879,7 @@ io.on('connection', (socket) => {
         const room = rooms.get(roomId);
         if (!room || room.over) return;
         const player = room.players.get(socket.id) ?? room.players.get(playerId);
-        if (!player) return;
+        if (!player || player.isBot) return;
 
         player.input = {
             left: Boolean(input.left),

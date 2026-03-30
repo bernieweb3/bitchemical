@@ -3,7 +3,6 @@ import Phaser from 'phaser';
 import { GAME_WIDTH, GAME_HEIGHT } from '../game/config';
 import { BootScene } from '../game/scenes/BootScene';
 import { BattleScene } from '../game/scenes/BattleScene';
-import { MultiplayerBattleScene } from '../game/scenes/MultiplayerBattleScene';
 import type { MatchFoundPayload } from './MatchmakingScreen';
 import type { GameMode } from '../types/gameMode';
 
@@ -11,6 +10,7 @@ interface GameCanvasProps {
     onGameOver: (winner: string, playerHp: number, aiHp: number) => void;
     selectedElements: string[];
     selectedElementImageUrls: Record<string, string>;
+    syncedLoadoutsByPlayer: Record<string, string[]> | null;
     gameMode: GameMode;
     multiplayerMatch: MatchFoundPayload | null;
     fullViewport?: boolean;
@@ -20,6 +20,7 @@ export function GameCanvas({
     onGameOver,
     selectedElements,
     selectedElementImageUrls,
+    syncedLoadoutsByPlayer,
     gameMode,
     multiplayerMatch,
     fullViewport = false,
@@ -30,8 +31,10 @@ export function GameCanvas({
     useEffect(() => {
         if (!containerRef.current || gameRef.current) return;
 
-        const isMultiplayer = gameMode !== 'vs-ai';
-        const scenes = isMultiplayer ? [BootScene, MultiplayerBattleScene] : [BootScene, BattleScene];
+        const scenes = [BootScene, BattleScene];
+        const localBattleMode = gameMode === 'pvp-1v1'
+            ? (multiplayerMatch?.team === 'A' ? 'local-1v1-host' : multiplayerMatch?.team === 'B' ? 'local-1v1-client' : 'local-1v1')
+            : 'vs-ai';
 
         const config: Phaser.Types.Core.GameConfig = {
             type: Phaser.CANVAS,
@@ -52,13 +55,14 @@ export function GameCanvas({
                 preBoot: (game) => {
                     game.registry.set('selectedElements', selectedElements);
                     game.registry.set('selectedElementImageUrls', selectedElementImageUrls);
-                    game.registry.set('multiplayerMatch', multiplayerMatch);
-                    game.registry.set('gameplayScene', isMultiplayer ? 'MultiplayerBattleScene' : 'BattleScene');
-                    game.registry.set('multiplayerInitData', isMultiplayer ? {
-                        roomId: multiplayerMatch?.roomId,
-                        mode: multiplayerMatch?.mode,
-                        playerId: multiplayerMatch?.playerId,
-                        team: multiplayerMatch?.team,
+                    game.registry.set('syncedLoadoutsByPlayer', syncedLoadoutsByPlayer);
+                    game.registry.set('battleMode', localBattleMode);
+                    const opponent = multiplayerMatch?.players.find((player) => player.id !== multiplayerMatch.playerId);
+                    game.registry.set('localRealtimeMatch', multiplayerMatch ? {
+                        roomId: multiplayerMatch.roomId,
+                        playerId: multiplayerMatch.playerId,
+                        team: multiplayerMatch.team,
+                        opponentPlayerId: opponent?.id,
                     } : null);
                 },
             },
@@ -69,13 +73,6 @@ export function GameCanvas({
 
         // Pass callback to active gameplay scene.
         game.events.once('ready', () => {
-            if (isMultiplayer) {
-                const mpScene = game.scene.getScene('MultiplayerBattleScene') as MultiplayerBattleScene;
-                if (mpScene) {
-                    mpScene.onGameOver = onGameOver;
-                }
-                return;
-            }
             const battleScene = game.scene.getScene('BattleScene') as BattleScene;
             if (battleScene) {
                 battleScene.onGameOver = onGameOver;
@@ -86,14 +83,6 @@ export function GameCanvas({
 
         // Listen for scene start to pass callback
         game.events.on('step', () => {
-            if (isMultiplayer) {
-                const scene = game.scene.getScene('MultiplayerBattleScene');
-                if (scene && scene.scene.isActive()) {
-                    (scene as MultiplayerBattleScene).onGameOver = onGameOver;
-                }
-                return;
-            }
-
             const battle = game.scene.getScene('BattleScene') as BattleScene;
             if (battle && battle.scene.isActive()) {
                 battle.onGameOver = onGameOver;
@@ -104,7 +93,7 @@ export function GameCanvas({
             gameRef.current?.destroy(true);
             gameRef.current = null;
         };
-    }, [onGameOver, selectedElements, selectedElementImageUrls, gameMode, multiplayerMatch]);
+    }, [onGameOver, selectedElements, selectedElementImageUrls, syncedLoadoutsByPlayer, gameMode, multiplayerMatch]);
 
     return (
         <div

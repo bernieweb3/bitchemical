@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "run-match-server-check",
+			"type": "shell",
+			"command": "npm",
+			"args": [
+				"run",
+				"match:server"
+			],
+			"isBackground": false
+		}
+	]
+}

@@ -1,6 +1,10 @@
 import { type MouseEvent, useEffect, useMemo, useRef, useState } from 'react';
 import periodicElements from '../data/periodic-elements.json';
 
+const AUTO_START_SECONDS = 7;
+const MAX_LOADOUT_SIZE = 3;
+const DEFAULT_AUTO_LOADOUT = ['K', 'Fe', 'Br'];
+
 const rawElementImageUrls = import.meta.glob('../../img/nguyento/*.svg', {
     eager: true,
     query: '?url',
@@ -8,8 +12,16 @@ const rawElementImageUrls = import.meta.glob('../../img/nguyento/*.svg', {
 }) as Record<string, string>;
 
 interface ElementLoadoutScreenProps {
-    onStartGame: (selectedElements: SelectedLoadoutItem[]) => void;
+    onStartGame: (
+        selectedElements: SelectedLoadoutItem[],
+        syncContext?: { syncedLoadoutsByPlayer?: Record<string, string[]> },
+    ) => void;
     onBack: () => void;
+    multiplayerSync?: {
+        roomId: string;
+        playerId: string;
+        expectedPlayers: number;
+    } | null;
 }
 
 export interface SelectedLoadoutItem {
@@ -37,6 +49,17 @@ type HoverCardState = {
     element: PeriodicElement;
     imageUrl: string | null;
 };
+
+interface LoadoutReadyEvent {
+    playerId: string;
+    symbols: string[];
+    sentAt: number;
+}
+
+interface LoadoutStartEvent {
+    startAt: number;
+    expectedPlayers: number;
+}
 
 const GROUP_LABELS = [
     { group: 1, label: 'IA' },
@@ -311,22 +334,41 @@ function getElementImageUrl(symbol: string) {
     return SYMBOL_IMAGE_URLS[symbol] ?? null;
 }
 
-export function ElementLoadoutScreen({ onStartGame, onBack }: ElementLoadoutScreenProps) {
+export function ElementLoadoutScreen({ onStartGame, onBack, multiplayerSync = null }: ElementLoadoutScreenProps) {
     const [theme, setTheme] = useState<ThemeMode>('light');
     const [query, setQuery] = useState('');
     const [filter, setFilter] = useState<string>('all');
     const [selectedLoadout, setSelectedLoadout] = useState<string[]>([]);
+    const [countdown, setCountdown] = useState(AUTO_START_SECONDS);
     const [hoverCard, setHoverCard] = useState<HoverCardState | null>(null);
     const [hoverCardVisible, setHoverCardVisible] = useState(false);
     const showTimerRef = useRef<number | null>(null);
     const hideTimerRef = useRef<number | null>(null);
+    const autoStartTimerRef = useRef<number | null>(null);
+    const syncStartTimerRef = useRef<number | null>(null);
+    const selectedLoadoutRef = useRef<string[]>([]);
+    const readyPayloadRef = useRef<LoadoutReadyEvent | null>(null);
+    const readyPlayersRef = useRef<Record<string, LoadoutReadyEvent>>({});
+    const syncChannelRef = useRef<BroadcastChannel | null>(null);
+    const plannedStartAtRef = useRef<number | null>(null);
+    const startedRef = useRef(false);
 
     useEffect(() => {
         return () => {
             if (showTimerRef.current !== null) window.clearTimeout(showTimerRef.current);
             if (hideTimerRef.current !== null) window.clearTimeout(hideTimerRef.current);
+            if (autoStartTimerRef.current !== null) window.clearInterval(autoStartTimerRef.current);
+            if (syncStartTimerRef.current !== null) window.clearTimeout(syncStartTimerRef.current);
+            if (syncChannelRef.current) {
+                syncChannelRef.current.close();
+                syncChannelRef.current = null;
+            }
         };
     }, []);
+
+    useEffect(() => {
+        selectedLoadoutRef.current = selectedLoadout;
+    }, [selectedLoadout]);
 
     const elements = useMemo<PeriodicElement[]>(() => {
         return (periodicElements as Array<{
@@ -422,6 +464,231 @@ export function ElementLoadoutScreen({ onStartGame, onBack }: ElementLoadoutScre
     const actinides = elements.filter((e) => e.series === 'actinide');
 
     const canStart = selectedLoadout.length === 3;
+
+    const resolveStartSymbols = (currentSymbols: string[]) => {
+        const inElements = new Set(elements.map((el) => el.symbol));
+        const unique = [...new Set(currentSymbols)].filter((symbol) => inElements.has(symbol));
+        const fallbackPool = [...DEFAULT_AUTO_LOADOUT, ...elements.map((el) => el.symbol)];
+
+        for (const symbol of fallbackPool) {
+            if (unique.length >= MAX_LOADOUT_SIZE) break;
+            if (!inElements.has(symbol)) continue;
+            if (unique.includes(symbol)) continue;
+            unique.push(symbol);
+        }
+
+        return unique.slice(0, MAX_LOADOUT_SIZE);
+    };
+
+    const getSyncedLoadoutMap = (selfSymbols: string[]) => {
+        const output: Record<string, string[]> = {};
+        const current = readyPlayersRef.current;
+        for (const [id, payload] of Object.entries(current)) {
+            output[id] = resolveStartSymbols(payload.symbols);
+        }
+        if (multiplayerSync) {
+            output[multiplayerSync.playerId] = resolveStartSymbols(selfSymbols);
+        }
+        return Object.keys(output).length > 0 ? output : undefined;
+    };
+
+    const startGameWithSymbols = (symbols: string[]) => {
+        if (startedRef.current) return;
+        const finalSymbols = resolveStartSymbols(symbols);
+        const tryScheduleSyncedStart = (channel: BroadcastChannel, startNow: () => void) => {
+            if (!multiplayerSync) return;
+            if (plannedStartAtRef.current !== null) return;
+
+            const readyPlayers = Object.values(readyPlayersRef.current);
+            if (readyPlayers.length < multiplayerSync.expectedPlayers) return;
+            if (!readyPayloadRef.current) return;
+
+            const sortedIds = readyPlayers.map((p) => p.playerId).sort();
+            if (sortedIds[0] !== multiplayerSync.playerId) return;
+
+            const startAt = Date.now() + 800;
+            plannedStartAtRef.current = startAt;
+            channel.postMessage({
+                type: 'loadout_start',
+                payload: {
+                    startAt,
+                    expectedPlayers: multiplayerSync.expectedPlayers,
+                } as LoadoutStartEvent,
+            });
+            const waitMs = Math.max(0, startAt - Date.now());
+            syncStartTimerRef.current = window.setTimeout(startNow, waitMs);
+        };
+
+        const startNow = () => {
+            if (startedRef.current) return;
+            startedRef.current = true;
+            if (autoStartTimerRef.current !== null) {
+                window.clearInterval(autoStartTimerRef.current);
+                autoStartTimerRef.current = null;
+            }
+            if (syncStartTimerRef.current !== null) {
+                window.clearTimeout(syncStartTimerRef.current);
+                syncStartTimerRef.current = null;
+            }
+            onStartGame(
+                finalSymbols.map((symbol) => ({ symbol, imageUrl: getElementImageUrl(symbol) })),
+                { syncedLoadoutsByPlayer: getSyncedLoadoutMap(finalSymbols) },
+            );
+        };
+
+        if (!multiplayerSync) {
+            startNow();
+            return;
+        }
+
+        const channel = syncChannelRef.current;
+        if (!channel) {
+            startNow();
+            return;
+        }
+
+        const selfReady: LoadoutReadyEvent = {
+            playerId: multiplayerSync.playerId,
+            symbols: finalSymbols,
+            sentAt: Date.now(),
+        };
+        readyPayloadRef.current = selfReady;
+        readyPlayersRef.current[multiplayerSync.playerId] = selfReady;
+        channel.postMessage({ type: 'loadout_ready', payload: selfReady });
+        tryScheduleSyncedStart(channel, startNow);
+    };
+
+    useEffect(() => {
+        if (!multiplayerSync) return;
+
+        const channelName = `bitchemical_loadout_${multiplayerSync.roomId}`;
+        const channel = new BroadcastChannel(channelName);
+        syncChannelRef.current = channel;
+
+        const onMessage = (event: MessageEvent) => {
+            const data = event.data as {
+                type?: string;
+                payload?: LoadoutReadyEvent | LoadoutStartEvent;
+            };
+
+            if (data.type === 'loadout_ready' && data.payload && 'playerId' in data.payload) {
+                readyPlayersRef.current[data.payload.playerId] = data.payload;
+
+                // Re-check coordination on every ready event to avoid deadlock when
+                // the second player's ready arrives after local timeout callback.
+                if (
+                    multiplayerSync
+                    && readyPayloadRef.current
+                    && plannedStartAtRef.current === null
+                    && syncChannelRef.current
+                ) {
+                    const readyPlayers = Object.values(readyPlayersRef.current);
+                    if (readyPlayers.length >= multiplayerSync.expectedPlayers) {
+                        const sortedIds = readyPlayers.map((p) => p.playerId).sort();
+                        if (sortedIds[0] === multiplayerSync.playerId) {
+                            const startAt = Date.now() + 800;
+                            plannedStartAtRef.current = startAt;
+                            syncChannelRef.current.postMessage({
+                                type: 'loadout_start',
+                                payload: {
+                                    startAt,
+                                    expectedPlayers: multiplayerSync.expectedPlayers,
+                                } as LoadoutStartEvent,
+                            });
+                            const waitMs = Math.max(0, startAt - Date.now());
+                            if (syncStartTimerRef.current !== null) {
+                                window.clearTimeout(syncStartTimerRef.current);
+                            }
+                            syncStartTimerRef.current = window.setTimeout(() => {
+                                if (startedRef.current) return;
+                                const selfReady = readyPayloadRef.current;
+                                if (!selfReady) return;
+                                startedRef.current = true;
+                                if (autoStartTimerRef.current !== null) {
+                                    window.clearInterval(autoStartTimerRef.current);
+                                    autoStartTimerRef.current = null;
+                                }
+                                onStartGame(
+                                    selfReady.symbols.map((symbol) => ({ symbol, imageUrl: getElementImageUrl(symbol) })),
+                                    {
+                                        syncedLoadoutsByPlayer: Object.fromEntries(
+                                            Object.entries(readyPlayersRef.current).map(([id, payload]) => [id, resolveStartSymbols(payload.symbols)]),
+                                        ),
+                                    },
+                                );
+                            }, waitMs);
+                        }
+                    }
+                }
+                return;
+            }
+
+            if (data.type === 'loadout_start' && data.payload && 'startAt' in data.payload) {
+                if (startedRef.current) return;
+
+                const selfReady = readyPayloadRef.current;
+                if (!selfReady) {
+                    startGameWithSymbols(selectedLoadoutRef.current);
+                    return;
+                }
+
+                plannedStartAtRef.current = data.payload.startAt;
+                const waitMs = Math.max(0, data.payload.startAt - Date.now());
+                if (syncStartTimerRef.current !== null) {
+                    window.clearTimeout(syncStartTimerRef.current);
+                }
+                syncStartTimerRef.current = window.setTimeout(() => {
+                    if (startedRef.current) return;
+                    startedRef.current = true;
+                    if (autoStartTimerRef.current !== null) {
+                        window.clearInterval(autoStartTimerRef.current);
+                        autoStartTimerRef.current = null;
+                    }
+                    onStartGame(
+                        selfReady.symbols.map((symbol) => ({ symbol, imageUrl: getElementImageUrl(symbol) })),
+                        { syncedLoadoutsByPlayer: getSyncedLoadoutMap(selfReady.symbols) },
+                    );
+                }, waitMs);
+            }
+        };
+
+        channel.addEventListener('message', onMessage);
+
+        return () => {
+            channel.removeEventListener('message', onMessage);
+            channel.close();
+            if (syncChannelRef.current === channel) {
+                syncChannelRef.current = null;
+            }
+        };
+    // onStartGame is stable from parent useCallback and safe here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [multiplayerSync?.roomId, multiplayerSync?.playerId, multiplayerSync?.expectedPlayers]);
+
+    useEffect(() => {
+        autoStartTimerRef.current = window.setInterval(() => {
+            setCountdown((prev) => {
+                if (prev <= 1) {
+                    if (autoStartTimerRef.current !== null) {
+                        window.clearInterval(autoStartTimerRef.current);
+                        autoStartTimerRef.current = null;
+                    }
+                    startGameWithSymbols(selectedLoadoutRef.current);
+                    return 0;
+                }
+                return prev - 1;
+            });
+        }, 1000);
+
+        return () => {
+            if (autoStartTimerRef.current !== null) {
+                window.clearInterval(autoStartTimerRef.current);
+                autoStartTimerRef.current = null;
+            }
+        };
+        // run once on screen mount
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const showElement = (e: PeriodicElement) => {
         if (filter !== 'all' && e.category !== filter) return false;
@@ -838,8 +1105,12 @@ export function ElementLoadoutScreen({ onStartGame, onBack }: ElementLoadoutScre
                                 Click 1 lan de chon nguyen to, click lan nua de bo chon. Re chuot vao o nguyen to de xem thong so.
                             </div>
 
+                            <div style={{ marginTop: 8, fontSize: 12, color: '#b45309', fontWeight: 700 }}>
+                                Tu dong vao game sau {countdown}s. Neu chua chon du, he thong se tu chon mac dinh.
+                            </div>
+
                             <button
-                                onClick={() => onStartGame(selectedLoadout.map((symbol) => ({ symbol, imageUrl: getElementImageUrl(symbol) })))}
+                                onClick={() => startGameWithSymbols(selectedLoadout)}
                                 disabled={!canStart}
                                 style={{
                                     marginTop: 12,
@@ -854,7 +1125,7 @@ export function ElementLoadoutScreen({ onStartGame, onBack }: ElementLoadoutScre
                                     textTransform: 'uppercase',
                                 }}
                             >
-                                Bat Dau
+                                Bat Dau ({countdown}s)
                             </button>
                         </div>
                     </div>

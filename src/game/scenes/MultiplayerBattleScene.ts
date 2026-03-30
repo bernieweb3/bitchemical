@@ -11,7 +11,7 @@ const MAX_MANA = 100;
 
 type TeamId = 'A' | 'B';
 
-type MatchMode = 'pvp-1v1' | 'pvp-2v2' | 'pvp-3v3';
+type MatchMode = 'pvp-1v1';
 
 interface RemotePlayer {
     id: string;
@@ -327,7 +327,7 @@ export class MultiplayerBattleScene extends Phaser.Scene {
         this.addOrUpdateLabel('hud_player_hp', `HP ${Math.round(localPlayer.hp)}`, 150, 23, '#ffffff', 0, '12px', 'bold');
         this.addOrUpdateLabel('hud_player_mana', `MANA ${Math.floor(localPlayer.mana)}/${MAX_MANA}`, 150, 48, '#4fc3f7', 0, '12px', 'bold');
 
-        this.addOrUpdateLabel('hud_enemy_label', this.mode === 'pvp-1v1' ? 'ENEMY' : 'ENEMY TEAM', GAME_WIDTH - 215, 23, '#ffffff', 0, '12px', 'bold');
+        this.addOrUpdateLabel('hud_enemy_label', 'ENEMY', GAME_WIDTH - 215, 23, '#ffffff', 0, '12px', 'bold');
         this.addOrUpdateLabel('hud_enemy_hp', `HP ${Math.round(enemyHp)}`, GAME_WIDTH - 55, 23, '#ffffff', 0, '12px', 'bold');
         this.addOrUpdateLabel('hud_enemy_mana', `MANA ${Math.round(enemyMana)}/${MAX_MANA}`, GAME_WIDTH - 55, 48, '#4fc3f7', 0, '12px', 'bold');
 

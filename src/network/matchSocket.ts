@@ -2,6 +2,7 @@ import { io, Socket } from 'socket.io-client';
 
 let socket: Socket | null = null;
 let resolvedServerUrl = '';
+let fallbackTried = false;
 
 function isLoopbackHost(hostname: string) {
     return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
@@ -56,12 +57,43 @@ export function getMatchSocket() {
 
     const serverUrl = resolveServerUrl();
     resolvedServerUrl = serverUrl;
+    fallbackTried = false;
 
     socket = io(serverUrl, {
-        transports: ['websocket', 'polling'],
+        // Start with polling for better compatibility; Socket.IO will upgrade to websocket when possible.
+        transports: ['polling', 'websocket'],
+        autoConnect: false,
         reconnection: true,
-        reconnectionAttempts: 10,
+        reconnectionAttempts: Infinity,
         reconnectionDelay: 400,
+        timeout: 8000,
+    });
+
+    socket.on('connect_error', () => {
+        if (fallbackTried) return;
+        try {
+            const parsed = new URL(serverUrl);
+            if (!isLoopbackHost(parsed.hostname)) return;
+            const fallbackHost = parsed.hostname === '127.0.0.1' ? 'localhost' : '127.0.0.1';
+            parsed.hostname = fallbackHost;
+            const fallbackUrl = parsed.toString().replace(/\/$/, '');
+            if (fallbackUrl === resolvedServerUrl) return;
+
+            fallbackTried = true;
+            resolvedServerUrl = fallbackUrl;
+            window.localStorage.setItem('matchServerUrl', fallbackUrl);
+            socket?.disconnect();
+            socket = io(fallbackUrl, {
+                transports: ['polling', 'websocket'],
+                autoConnect: false,
+                reconnection: true,
+                reconnectionAttempts: Infinity,
+                reconnectionDelay: 400,
+                timeout: 8000,
+            });
+        } catch {
+            // Ignore URL fallback errors and keep reconnecting on the original URL.
+        }
     });
 
     return socket;
@@ -71,4 +103,5 @@ export function disconnectMatchSocket() {
     if (!socket) return;
     socket.disconnect();
     socket = null;
+    fallbackTried = false;
 }

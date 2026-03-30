@@ -10,8 +10,6 @@ export function MainMenu({ onStartGame }: MainMenuProps) {
     const gameModes = [
         { mode: 'vs-ai' as const, name: 'Choi voi may', accent: 'mode-solo', note: '1vAI tactical duel', icon: '🤖', badge: 'AI' },
         { mode: 'pvp-1v1' as const, name: 'PVP 1v1', accent: 'mode-duo', note: 'Dau 1 doi 1 real-time', icon: '⚔', badge: '1V1' },
-        { mode: 'pvp-2v2' as const, name: 'PVP 2v2', accent: 'mode-squad', note: 'Doi hinh 2 nguoi moi ben', icon: '👥', badge: '2V2' },
-        { mode: 'pvp-3v3' as const, name: 'PVP 3v3', accent: 'mode-raid', note: 'Tran chien 6 nguoi real-time', icon: '🛡', badge: '3V3' },
     ];
 
     const railItems = [
@@ -98,7 +96,7 @@ export function MainMenu({ onStartGame }: MainMenuProps) {
                         ))}
                     </div>
 
-                    <button className="vip-banner" onClick={() => onStartGame('pvp-3v3')}>
+                    <button className="vip-banner" onClick={() => onStartGame('pvp-1v1')}>
                         <div className="vip-glow" />
                         <div className="vip-left">
                             <div className="vip-icon">🌟</div>

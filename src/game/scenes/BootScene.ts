@@ -170,7 +170,7 @@ const IDLE_FRAME_ASSETS = buildSortedFrameAssets(rawIdleImageUrls);
 const RUN_FRAME_ASSETS = buildSortedFrameAssets(rawRunImageUrls);
 
 export class BootScene extends Phaser.Scene {
-    private selectedElementsForProjectile: string[] = [];
+    private projectileSymbolsToPrepare: string[] = [];
 
     constructor() {
         super({ key: 'BootScene' });
@@ -185,9 +185,12 @@ export class BootScene extends Phaser.Scene {
         });
 
         const selectedElements = (this.registry.get('selectedElements') as string[] | undefined) ?? [];
-        this.selectedElementsForProjectile = selectedElements.slice(0, 3).map((s) => s.trim()).filter(Boolean);
+        const selectedSymbols = selectedElements.slice(0, 3).map((s) => s.trim()).filter(Boolean);
+        const knownSymbols = Object.keys(ELEMENTS);
+        this.projectileSymbolsToPrepare = Array.from(new Set([...selectedSymbols, ...knownSymbols]));
+
         const selectedElementImageUrls = (this.registry.get('selectedElementImageUrls') as Record<string, string> | undefined) ?? {};
-        this.selectedElementsForProjectile.forEach((symbol) => {
+        this.projectileSymbolsToPrepare.forEach((symbol) => {
             const url = selectedElementImageUrls[symbol] ?? resolveElementImageUrl(symbol);
             if (url) {
                 this.load.image(`projectile_${symbol}`, url);
@@ -205,22 +208,15 @@ export class BootScene extends Phaser.Scene {
 
     create() {
         this.createCharacterAnimation();
-        this.selectedElementsForProjectile.forEach((symbol) => {
+        this.projectileSymbolsToPrepare.forEach((symbol) => {
             this.createProjectileDisplayTexture(symbol);
         });
         const selectedElements = this.registry.get('selectedElements') as string[] | undefined;
-        const gameplayScene = (this.registry.get('gameplayScene') as string | undefined) ?? 'BattleScene';
-        const multiplayerInitData = (this.registry.get('multiplayerInitData') as Record<string, unknown> | undefined) ?? {};
+        const battleMode = (this.registry.get('battleMode') as 'vs-ai' | 'local-1v1' | 'local-1v1-host' | 'local-1v1-client' | undefined) ?? 'vs-ai';
+        const localRealtimeMatch = (this.registry.get('localRealtimeMatch') as Record<string, unknown> | undefined) ?? null;
 
-        if (gameplayScene === 'MultiplayerBattleScene') {
-            this.scene.start('MultiplayerBattleScene', {
-                ...multiplayerInitData,
-                selectedElements,
-            });
-            return;
-        }
-
-        this.scene.start('BattleScene', { selectedElements });
+            const syncedLoadoutsByPlayer = this.registry.get('syncedLoadoutsByPlayer') as Record<string, string[]> | undefined;
+            this.scene.start('BattleScene', { selectedElements, syncedLoadoutsByPlayer, battleMode, localRealtimeMatch });
     }
 
     private createProjectileDisplayTexture(symbol: string) {

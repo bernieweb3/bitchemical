@@ -47,6 +47,7 @@ interface CharacterState {
 }
 
 interface ProjectileState {
+    id: string;
     x: number;
     y: number;
     velX: number;
@@ -88,6 +89,35 @@ interface CharacterHitbox {
     height: number;
 }
 
+interface LocalRealtimeMatch {
+    roomId: string;
+    playerId: string;
+    team: 'A' | 'B';
+    opponentPlayerId?: string;
+}
+
+interface RealtimeInputPayload {
+    left: boolean;
+    right: boolean;
+    up: boolean;
+    down: boolean;
+    shoot: boolean;
+    build: boolean;
+    aimX: number;
+    aimY: number;
+    selectedElement: string;
+}
+
+interface RealtimeSnapshotPayload {
+    player: CharacterState;
+    ai: CharacterState;
+    blocks: BlockState[];
+    projectiles: ProjectileState[];
+    matchTimer: number;
+    gameOver: boolean;
+    winner: string;
+}
+
 // ─── BattleScene ──────────────────────────────────────────────
 export class BattleScene extends Phaser.Scene {
     private readonly projectileDisplaySize = 44;
@@ -114,11 +144,20 @@ export class BattleScene extends Phaser.Scene {
     private keyDown!: Phaser.Input.Keyboard.Key;
     private keyLeft!: Phaser.Input.Keyboard.Key;
     private keyRight!: Phaser.Input.Keyboard.Key;
+    private keyJ!: Phaser.Input.Keyboard.Key;
+    private keyL!: Phaser.Input.Keyboard.Key;
+    private keyI!: Phaser.Input.Keyboard.Key;
+    private keyK!: Phaser.Input.Keyboard.Key;
+    private keyO!: Phaser.Input.Keyboard.Key;
+    private keyU!: Phaser.Input.Keyboard.Key;
+    private keyN!: Phaser.Input.Keyboard.Key;
+    private keyM!: Phaser.Input.Keyboard.Key;
 
     private playerAimAngle = 45;
     private selectedElement = 'C';
     private selectedElementKeys: string[] = [...ELEMENT_KEYS.slice(0, 3)];
     private selectedShotKeys: string[] = [...ELEMENT_KEYS.slice(0, 3)];
+    private opponentElementKeys: string[] = [...ELEMENT_KEYS.slice(0, 3)];
     private lastShotElement = 'C';
     private aimTargetX = GAME_WIDTH / 2;
     private aimTargetY = GAME_HEIGHT / 2;
@@ -144,6 +183,36 @@ export class BattleScene extends Phaser.Scene {
     private readonly playerShotSpeedMultiplier = 1.25;
     private readonly playerShotCooldownMs = 180;
     private lastPlayerShotAt = 0;
+    private lastOpponentShotAt = 0;
+    private battleMode: 'vs-ai' | 'local-1v1' | 'local-1v1-host' | 'local-1v1-client' = 'vs-ai';
+    private opponentSelectedElement = 'C';
+    private realtimeMatch: LocalRealtimeMatch | null = null;
+    private realtimeChannel: BroadcastChannel | null = null;
+    private remoteInput: RealtimeInputPayload = {
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        shoot: false,
+        build: false,
+        aimX: 0,
+        aimY: 0,
+        selectedElement: 'C',
+    };
+    private networkInput: RealtimeInputPayload = {
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        shoot: false,
+        build: false,
+        aimX: 0,
+        aimY: 0,
+        selectedElement: 'C',
+    };
+    private snapshotAccumulator = 0;
+    private projectileIdCounter = 0;
+    private syncedLoadoutsByPlayer: Record<string, string[]> | null = null;
 
     // Phaser Graphics objects
     private gfx!: Phaser.GameObjects.Graphics;
@@ -157,24 +226,54 @@ export class BattleScene extends Phaser.Scene {
         super({ key: 'BattleScene' });
     }
 
-    init(data: { onGameOver?: (winner: string, playerHp: number, aiHp: number) => void; selectedElements?: string[] }) {
+    init(data: {
+        onGameOver?: (winner: string, playerHp: number, aiHp: number) => void;
+        selectedElements?: string[];
+        syncedLoadoutsByPlayer?: Record<string, string[]>;
+        battleMode?: 'vs-ai' | 'local-1v1' | 'local-1v1-host' | 'local-1v1-client';
+        localRealtimeMatch?: LocalRealtimeMatch;
+    }) {
         if (data.onGameOver) {
             this.onGameOver = data.onGameOver;
         }
 
-        const rawShots = (data.selectedElements ?? [])
-            .map((key) => String(key).trim())
-            .filter((key) => key.length > 0)
-            .slice(0, 3);
-        if (rawShots.length > 0) {
-            this.selectedShotKeys = rawShots;
-        }
+        this.battleMode = data.battleMode
+            ?? (this.registry.get('battleMode') as 'vs-ai' | 'local-1v1' | 'local-1v1-host' | 'local-1v1-client' | undefined)
+            ?? 'vs-ai';
+        this.realtimeMatch = data.localRealtimeMatch
+            ?? (this.registry.get('localRealtimeMatch') as LocalRealtimeMatch | undefined)
+            ?? null;
+        this.syncedLoadoutsByPlayer = data.syncedLoadoutsByPlayer
+            ?? (this.registry.get('syncedLoadoutsByPlayer') as Record<string, string[]> | undefined)
+            ?? null;
 
-        if (data.selectedElements && data.selectedElements.length > 0) {
-            const filtered = data.selectedElements.filter((key) => Boolean(ELEMENTS[key])).slice(0, 3);
-            if (filtered.length > 0) {
-                this.selectedElementKeys = filtered;
-                this.selectedElement = filtered[0];
+        const normalizeLoadout = (raw: string[] | undefined) => {
+            const filtered = (raw ?? []).filter((key) => Boolean(ELEMENTS[key])).slice(0, 3);
+            while (filtered.length < 3) {
+                const fallback = ELEMENT_KEYS.find((k) => !filtered.includes(k));
+                if (!fallback) break;
+                filtered.push(fallback);
+            }
+            return filtered;
+        };
+
+        this.selectedElementKeys = normalizeLoadout(data.selectedElements);
+        this.selectedShotKeys = [...this.selectedElementKeys];
+        this.opponentElementKeys = [...this.selectedElementKeys];
+
+        if (this.realtimeMatch?.playerId && this.syncedLoadoutsByPlayer) {
+            const selfLoadout = normalizeLoadout(this.syncedLoadoutsByPlayer[this.realtimeMatch.playerId]);
+            if (selfLoadout.length > 0) {
+                this.selectedElementKeys = selfLoadout;
+                this.selectedShotKeys = [...selfLoadout];
+            }
+
+            const opponentId = this.realtimeMatch.opponentPlayerId;
+            if (opponentId) {
+                const opponentLoadout = normalizeLoadout(this.syncedLoadoutsByPlayer[opponentId]);
+                if (opponentLoadout.length > 0) {
+                    this.opponentElementKeys = opponentLoadout;
+                }
             }
         }
 
@@ -189,6 +288,14 @@ export class BattleScene extends Phaser.Scene {
             const fallback = this.selectedElementKeys[this.selectedShotKeys.length] ?? ELEMENT_KEYS[this.selectedShotKeys.length] ?? ELEMENT_KEYS[0];
             this.selectedShotKeys.push(fallback);
         }
+
+        while (this.opponentElementKeys.length < 3) {
+            const fallback = ELEMENT_KEYS.find((k) => !this.opponentElementKeys.includes(k));
+            if (!fallback) break;
+            this.opponentElementKeys.push(fallback);
+        }
+
+        this.selectedElement = this.selectedElementKeys[0] ?? 'C';
     }
 
     create() {
@@ -207,10 +314,14 @@ export class BattleScene extends Phaser.Scene {
         this.cameraShakeX = 0;
         this.cameraShakeY = 0;
         this.lastPlayerShotAt = -this.playerShotCooldownMs;
+        this.lastOpponentShotAt = -this.playerShotCooldownMs;
+        this.opponentSelectedElement = this.opponentElementKeys[0] ?? 'C';
+        this.snapshotAccumulator = 0;
+        this.projectileIdCounter = 0;
 
         // Characters
-        this.player = this.createChar(170, 520, 'left');
-        this.ai = this.createChar(1360, 520, 'right');
+        this.player = this.createChar(170, 520, 'left', this.selectedElementKeys);
+        this.ai = this.createChar(1360, 520, 'right', this.opponentElementKeys);
         this.aiLastPlayerX = this.player.x;
         this.aiLastPlayerY = this.player.y;
         this.playerVelocityHistory = [];
@@ -239,6 +350,14 @@ export class BattleScene extends Phaser.Scene {
         this.keyDown = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.DOWN);
         this.keyLeft = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.LEFT);
         this.keyRight = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.RIGHT);
+        this.keyJ = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.J);
+        this.keyL = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.L);
+        this.keyI = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.I);
+        this.keyK = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.K);
+        this.keyO = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.O);
+        this.keyU = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.U);
+        this.keyN = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.N);
+        this.keyM = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.M);
 
         // Keyboard listener (restart only on game over)
         this.input.keyboard!.on('keydown', (event: KeyboardEvent) => {
@@ -252,6 +371,13 @@ export class BattleScene extends Phaser.Scene {
 
         this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
             if (this.gameOver) return;
+            if (this.battleMode === 'local-1v1-client') {
+                const camera = this.cameras.main;
+                this.networkInput.aimX = pointer.x + camera.scrollX;
+                this.networkInput.aimY = pointer.y + camera.scrollY;
+                this.networkInput.shoot = true;
+                return;
+            }
             this.handlePlayerClickShot(pointer);
         });
 
@@ -270,6 +396,24 @@ export class BattleScene extends Phaser.Scene {
             if (this.gameOver) return;
             this.placeBlock();
         });
+        this.keyN.on('down', () => {
+            if (this.gameOver || this.battleMode !== 'local-1v1') return;
+            const idx = this.selectedElementKeys.indexOf(this.opponentSelectedElement);
+            this.opponentSelectedElement = this.selectedElementKeys[(idx - 1 + this.selectedElementKeys.length) % this.selectedElementKeys.length];
+        });
+        this.keyM.on('down', () => {
+            if (this.gameOver || this.battleMode !== 'local-1v1') return;
+            const idx = this.selectedElementKeys.indexOf(this.opponentSelectedElement);
+            this.opponentSelectedElement = this.selectedElementKeys[(idx + 1) % this.selectedElementKeys.length];
+        });
+        this.keyU.on('down', () => {
+            if (this.gameOver || this.battleMode !== 'local-1v1') return;
+            this.placeBlockFor(this.ai, this.opponentSelectedElement);
+        });
+        this.keyO.on('down', () => {
+            if (this.gameOver || this.battleMode !== 'local-1v1') return;
+            this.handleOpponentShoot();
+        });
         this.keyShift.on('down', () => {
             if (this.gameOver) return;
             this.placeBlock();
@@ -285,10 +429,18 @@ export class BattleScene extends Phaser.Scene {
         });
         this.keyUp.on('down', () => {
             if (!this.buildMode || this.gameOver) return;
+            if (this.battleMode === 'local-1v1-client') {
+                this.networkInput.build = true;
+                return;
+            }
             this.cursorGridY = Math.max(0, this.cursorGridY - 1);
         });
         this.keyDown.on('down', () => {
             if (!this.buildMode || this.gameOver) return;
+            if (this.battleMode === 'local-1v1-client') {
+                this.networkInput.build = true;
+                return;
+            }
             this.cursorGridY = Math.min(Math.floor((GAME_HEIGHT - 1) / BLOCK_SIZE), this.cursorGridY + 1);
         });
         this.keyLeft.on('down', () => {
@@ -314,12 +466,33 @@ export class BattleScene extends Phaser.Scene {
 
         // Create persistent UI text objects
         this.createUITexts();
+
+        if ((this.battleMode === 'local-1v1-host' || this.battleMode === 'local-1v1-client') && this.realtimeMatch?.roomId) {
+            const channelName = `bitchemical_realtime_${this.realtimeMatch.roomId}`;
+            this.realtimeChannel = new BroadcastChannel(channelName);
+            this.realtimeChannel.onmessage = (event: MessageEvent) => {
+                const data = event.data as {
+                    type?: string;
+                    playerId?: string;
+                    payload?: RealtimeInputPayload | RealtimeSnapshotPayload;
+                };
+                if (data.playerId === this.realtimeMatch?.playerId) return;
+
+                if (this.battleMode === 'local-1v1-host' && data.type === 'input' && data.payload) {
+                    this.remoteInput = data.payload as RealtimeInputPayload;
+                }
+
+                if (this.battleMode === 'local-1v1-client' && data.type === 'state' && data.payload) {
+                    this.applyRealtimeSnapshot(data.payload as RealtimeSnapshotPayload);
+                }
+            };
+        }
     }
 
-    private createChar(x: number, y: number, side: 'left' | 'right'): CharacterState {
+    private createChar(x: number, y: number, side: 'left' | 'right', allowedKeys: string[] = this.selectedElementKeys): CharacterState {
         const inventory: Record<string, number> = {};
         ELEMENT_KEYS.forEach((key) => {
-            inventory[key] = this.selectedElementKeys.includes(key) ? (STARTING_INVENTORY[key] ?? 3) : 0;
+            inventory[key] = allowedKeys.includes(key) ? (STARTING_INVENTORY[key] ?? 3) : 0;
         });
 
         return {
@@ -414,15 +587,38 @@ export class BattleScene extends Phaser.Scene {
 
         if (!this.gameOver) {
             this.regenMana(dt);
-            this.updateMouseAim();
-            this.handleInput();
-            this.updateChar(this.player, dt);
-            this.updateAI(dt);
-            this.updateChar(this.ai, dt);
-            this.enforceFacingTowardOpponent();
-            this.updateProjectiles(dt);
-            this.updateParticles(dt);
-            this.updateCameraShake();
+            if (this.battleMode === 'local-1v1-client') {
+                this.captureNetworkInput();
+                this.sendRealtimeInput();
+            } else {
+                this.updateMouseAim();
+                this.handleInput();
+                this.updateChar(this.player, dt);
+            }
+
+            if (this.battleMode === 'local-1v1-host') {
+                this.applyRemoteInputToOpponent();
+                this.updateChar(this.ai, dt);
+                this.snapshotAccumulator += delta;
+                if (this.snapshotAccumulator >= 16) {
+                    this.snapshotAccumulator = 0;
+                    this.broadcastRealtimeSnapshot();
+                }
+            } else if (this.battleMode === 'local-1v1') {
+                this.updateChar(this.ai, dt);
+            } else if (this.battleMode === 'local-1v1-client') {
+                // Client receives state from host and only renders it.
+            } else {
+                this.updateAI(dt);
+                this.updateChar(this.ai, dt);
+            }
+
+            if (this.battleMode !== 'local-1v1-client') {
+                this.enforceFacingTowardOpponent();
+                this.updateProjectiles(dt);
+                this.updateParticles(dt);
+                this.updateCameraShake();
+            }
         }
 
         this.syncCharacterSprite(this.player, this.playerSprite);
@@ -433,12 +629,138 @@ export class BattleScene extends Phaser.Scene {
         this.updateUITexts();
     }
 
+    private captureNetworkInput() {
+        this.networkInput.left = this.keyA.isDown;
+        this.networkInput.right = this.keyD.isDown;
+        this.networkInput.up = this.keyW.isDown;
+        this.networkInput.down = this.keyS.isDown;
+        this.networkInput.selectedElement = this.selectedElement;
+
+        const pointer = this.input.activePointer;
+        if (pointer) {
+            const camera = this.cameras.main;
+            this.networkInput.aimX = pointer.x + camera.scrollX;
+            this.networkInput.aimY = pointer.y + camera.scrollY;
+        }
+    }
+
+    private sendRealtimeInput() {
+        if (!this.realtimeChannel || !this.realtimeMatch) return;
+        this.realtimeChannel.postMessage({
+            type: 'input',
+            playerId: this.realtimeMatch.playerId,
+            payload: { ...this.networkInput },
+        });
+        this.networkInput.shoot = false;
+        this.networkInput.build = false;
+    }
+
+    private applyRemoteInputToOpponent() {
+        this.ai.crouching = this.remoteInput.down;
+        if (this.remoteInput.left) this.ai.velX = -MOVE_SPEED;
+        if (this.remoteInput.right) this.ai.velX = MOVE_SPEED;
+        if (this.remoteInput.up && this.ai.onGround) this.ai.velY = JUMP_FORCE;
+
+        if (this.remoteInput.selectedElement && this.opponentElementKeys.includes(this.remoteInput.selectedElement)) {
+            this.opponentSelectedElement = this.remoteInput.selectedElement;
+        }
+
+        if (this.remoteInput.shoot) {
+            const angle = this.getAngleFromAimFor(this.ai, this.remoteInput.aimX, this.remoteInput.aimY);
+            const shotElement = this.opponentElementKeys.length > 0
+                ? Phaser.Utils.Array.GetRandom(this.opponentElementKeys)
+                : this.opponentSelectedElement;
+            const shotFired = this.shootProjectile(this.ai, angle, false, this.playerShotSpeedMultiplier, shotElement);
+            if (shotFired) this.lastOpponentShotAt = this.time.now;
+        }
+        if (this.remoteInput.build) {
+            this.placeBlockFor(this.ai, this.opponentSelectedElement);
+        }
+
+        this.remoteInput.shoot = false;
+        this.remoteInput.build = false;
+    }
+
+    private getAngleFromAimFor(c: CharacterState, aimX: number, aimY: number) {
+        const muzzle = this.getGunMuzzlePosition(c);
+        const dx = aimX - muzzle.x;
+        const dy = aimY - muzzle.y;
+        const angleRad = Math.atan2(-dy, Math.max(1, Math.abs(dx)));
+        return Phaser.Math.Clamp(Phaser.Math.RadToDeg(angleRad), 0, 90);
+    }
+
+    private broadcastRealtimeSnapshot() {
+        if (!this.realtimeChannel || !this.realtimeMatch) return;
+        const payload: RealtimeSnapshotPayload = {
+            player: { ...this.player, inventory: { ...this.player.inventory } },
+            ai: { ...this.ai, inventory: { ...this.ai.inventory } },
+            blocks: this.blocks.map((b) => ({ ...b })),
+            projectiles: this.projectiles.map((p) => ({
+                ...p,
+                trail: p.trail.map((t) => ({ ...t })),
+                sprite: undefined,
+            })),
+            matchTimer: this.matchTimer,
+            gameOver: this.gameOver,
+            winner: this.winner,
+        };
+        this.realtimeChannel.postMessage({ type: 'state', playerId: this.realtimeMatch.playerId, payload });
+    }
+
+    private applyRealtimeSnapshot(snapshot: RealtimeSnapshotPayload) {
+        this.player = { ...snapshot.player, inventory: { ...snapshot.player.inventory } };
+        this.ai = { ...snapshot.ai, inventory: { ...snapshot.ai.inventory } };
+        this.blocks = snapshot.blocks.map((b) => ({ ...b }));
+
+        const previousSprites = new Map<string, Phaser.GameObjects.Image | undefined>(
+            this.projectiles.map((p) => [p.id, p.sprite]),
+        );
+        const incomingIds = new Set(snapshot.projectiles.map((p) => p.id));
+
+        for (const existing of this.projectiles) {
+            if (!incomingIds.has(existing.id)) {
+                existing.sprite?.destroy();
+            }
+        }
+
+        this.projectiles = snapshot.projectiles.map((p) => {
+            const mapped: ProjectileState = {
+                ...p,
+                trail: p.trail.map((t) => ({ ...t })),
+                sprite: previousSprites.get(p.id),
+            };
+            this.ensureProjectileSprite(mapped);
+            return mapped;
+        });
+
+        this.matchTimer = snapshot.matchTimer;
+        this.gameOver = snapshot.gameOver;
+        this.winner = snapshot.winner;
+
+        if (this.gameOver) {
+            this.onGameOver?.(this.winner, this.player.health, this.ai.health);
+        }
+    }
+
     // ─── Input ───────────────────────────────────────────────
     private handleInput() {
         if (this.keyA.isDown) { this.player.velX = -MOVE_SPEED; }
         if (this.keyD.isDown) { this.player.velX = MOVE_SPEED; }
         if (this.keyW.isDown && this.player.onGround) { this.player.velY = JUMP_FORCE; }
         this.player.crouching = this.keyS.isDown;
+
+        if (this.battleMode === 'local-1v1') {
+            if (this.keyJ.isDown) { this.ai.velX = -MOVE_SPEED; }
+            if (this.keyL.isDown) { this.ai.velX = MOVE_SPEED; }
+            if (this.keyI.isDown && this.ai.onGround) { this.ai.velY = JUMP_FORCE; }
+            this.ai.crouching = this.keyK.isDown;
+        }
+
+        if (this.battleMode === 'local-1v1-client') {
+            if (this.keyQ.isDown || this.keyE.isDown) {
+                this.networkInput.selectedElement = this.selectedElement;
+            }
+        }
     }
 
     private updateMouseAim() {
@@ -492,6 +814,21 @@ export class BattleScene extends Phaser.Scene {
         this.lastPlayerShotAt = now;
     }
 
+    private handleOpponentShoot() {
+        const now = this.time.now;
+        if (now - this.lastOpponentShotAt < this.playerShotCooldownMs) {
+            return;
+        }
+        const shotElement = this.opponentElementKeys.length > 0
+            ? Phaser.Utils.Array.GetRandom(this.opponentElementKeys)
+            : this.opponentSelectedElement;
+        const shotFired = this.shootProjectile(this.ai, this.getCurrentOpponentAngle(), false, this.playerShotSpeedMultiplier, shotElement);
+        if (!shotFired) {
+            return;
+        }
+        this.lastOpponentShotAt = now;
+    }
+
     private regenMana(dt: number) {
         const regenAmount = MANA_REGEN_PER_SECOND * dt;
         this.player.mana = Phaser.Math.Clamp(this.player.mana + regenAmount, 0, MAX_MANA);
@@ -505,6 +842,16 @@ export class BattleScene extends Phaser.Scene {
 
     private getCurrentPlayerAngle() {
         return this.playerAimAngle;
+    }
+
+    private getCurrentOpponentAngle() {
+        const muzzle = this.getGunMuzzlePosition(this.ai);
+        const targetX = this.player.x + this.player.width / 2;
+        const targetY = this.player.y + this.player.height / 2;
+        const dx = targetX - muzzle.x;
+        const dy = targetY - muzzle.y;
+        const angleRad = Math.atan2(-dy, Math.max(1, Math.abs(dx)));
+        return Phaser.Math.Clamp(Phaser.Math.RadToDeg(angleRad), 0, 90);
     }
 
     private hashElementKey(key: string) {
@@ -603,37 +950,19 @@ export class BattleScene extends Phaser.Scene {
         const normalizedElement = elementKey?.trim();
         const effectVariant = this.getProjectileVariant(normalizedElement);
         const primaryColor = this.getProjectilePrimaryColor(normalizedElement, isPlayer);
-        const textureCandidates = normalizedElement
-            ? [
-                `projectile_display_${normalizedElement}`,
-                `projectile_display_${normalizedElement.toLowerCase()}`,
-                `projectile_display_${normalizedElement.toUpperCase()}`,
-                `projectile_${normalizedElement}`,
-                `projectile_${normalizedElement.toLowerCase()}`,
-                `projectile_${normalizedElement.toUpperCase()}`,
-            ]
-            : [];
-        const textureKey = textureCandidates.find((key) => this.textures.exists(key));
-
-        if (isPlayer && !textureKey) {
-            return false;
-        }
+        const textureKey = this.resolveProjectileTextureKey(normalizedElement, primaryColor);
+        const projectileId = `${this.realtimeMatch?.roomId ?? 'offline'}_${this.projectileIdCounter++}`;
 
         const sprite = textureKey
             ? this.add.image(muzzle.x, muzzle.y, textureKey).setDepth(35).setDisplaySize(this.projectileDisplaySize, this.projectileDisplaySize)
             : undefined;
         if (sprite) {
             sprite.setAlpha(0.95);
-            sprite.setRotation(Math.random() * Math.PI * 2);
-            if (effectVariant === 0 || effectVariant === 3) {
-                sprite.setBlendMode(Phaser.BlendModes.ADD);
-            } else if (effectVariant === 1) {
-                sprite.setBlendMode(Phaser.BlendModes.SCREEN);
-            }
-            sprite.setTint(primaryColor);
+            sprite.setBlendMode(Phaser.BlendModes.NORMAL);
         }
 
         this.projectiles.push({
+            id: projectileId,
             x: muzzle.x,
             y: muzzle.y,
             velX: Math.cos(rad) * speed * dir,
@@ -648,8 +977,52 @@ export class BattleScene extends Phaser.Scene {
             trail: [],
         });
 
+        const created = this.projectiles[this.projectiles.length - 1];
+        this.syncProjectileSpriteTransform(created);
+
         c.mana = Math.max(0, c.mana - MANA_COST_SHOT);
         return true;
+    }
+
+    private resolveProjectileTextureKey(elementKey: string | undefined, _fallbackColor: number) {
+        if (!elementKey) return null;
+        const normalizedElement = elementKey.trim();
+        const displayCandidates = [
+            `projectile_display_${normalizedElement}`,
+            `projectile_display_${normalizedElement.toLowerCase()}`,
+            `projectile_display_${normalizedElement.toUpperCase()}`,
+        ];
+        const readyDisplay = displayCandidates.find((key) => this.textures.exists(key));
+        return readyDisplay ?? null;
+    }
+
+    private ensureProjectileSprite(projectile: ProjectileState) {
+        if (projectile.sprite || !projectile.active) return;
+        const color = this.getProjectilePrimaryColor(projectile.elementKey, projectile.isPlayerProjectile);
+        const textureKey = this.resolveProjectileTextureKey(projectile.elementKey, color);
+        if (!textureKey) return;
+
+        const sprite = this.add.image(projectile.x, projectile.y, textureKey)
+            .setDepth(35)
+            .setDisplaySize(this.projectileDisplaySize, this.projectileDisplaySize)
+            .setAlpha(0.95);
+
+        sprite.setBlendMode(Phaser.BlendModes.NORMAL);
+
+        projectile.sprite = sprite;
+        this.syncProjectileSpriteTransform(projectile);
+    }
+
+    private syncProjectileSpriteTransform(projectile: ProjectileState) {
+        if (!projectile.sprite) return;
+
+        const pulseAmp = projectile.effectVariant === 2 ? 0.07 : 0.055;
+        const pulseRate = projectile.effectVariant === 2 ? 13 : 10;
+        const pulse = 1 + Math.sin(projectile.age * pulseRate) * pulseAmp;
+        projectile.sprite.setPosition(projectile.x, projectile.y);
+        projectile.sprite.setRotation(projectile.age * projectile.spinSpeed);
+        projectile.sprite.setDisplaySize(this.projectileDisplaySize * pulse, this.projectileDisplaySize * pulse);
+        projectile.sprite.setAlpha(0.9);
     }
 
     private getCharacterHitbox(c: CharacterState): CharacterHitbox {
@@ -708,13 +1081,7 @@ export class BattleScene extends Phaser.Scene {
             p.x += p.velX * dt;
             p.y += p.velY * dt;
             if (p.sprite) {
-                p.sprite.setPosition(p.x, p.y);
-                p.sprite.setRotation(p.sprite.rotation + p.spinSpeed * dt);
-                const pulseAmp = p.effectVariant === 3 ? 0.12 : p.effectVariant === 1 ? 0.09 : 0.07;
-                const pulseRate = p.effectVariant === 0 ? 34 : p.effectVariant === 1 ? 28 : p.effectVariant === 2 ? 18 : 24;
-                const pulse = 1 + Math.sin(p.age * pulseRate) * pulseAmp;
-                p.sprite.setDisplaySize(this.projectileDisplaySize * pulse, this.projectileDisplaySize * pulse);
-                p.sprite.setAlpha(0.74 + Math.sin(p.age * (pulseRate - 2)) * 0.16);
+                this.syncProjectileSpriteTransform(p);
             }
 
             if (p.x < -50 || p.x > GAME_WIDTH + 50 || p.y > GAME_HEIGHT + 50) {
@@ -810,21 +1177,26 @@ export class BattleScene extends Phaser.Scene {
 
     // ─── Block Placement ───────────────────────────────────
     private placeBlock() {
-        const elem = ELEMENTS[this.selectedElement];
-        if (this.player.inventory[this.selectedElement] <= 0) return;
-        if (this.player.mana < MANA_COST_BLOCK) return;
+        this.placeBlockFor(this.player, this.selectedElement);
+    }
+
+    private placeBlockFor(actor: CharacterState, elementKey: string) {
+        const elem = ELEMENTS[elementKey];
+        if (!elem) return;
+        if (actor.inventory[elementKey] <= 0) return;
+        if (actor.mana < MANA_COST_BLOCK) return;
 
         let bx: number, by: number;
-        if (this.buildMode) {
+        if (actor.side === 'left' && this.buildMode) {
             // Use cursor position
             bx = this.cursorGridX * BLOCK_SIZE;
             by = this.cursorGridY * BLOCK_SIZE;
         } else {
             // Legacy: place in front of player
-            bx = this.player.facingRight
-                ? Math.floor((this.player.x + this.player.width) / BLOCK_SIZE) * BLOCK_SIZE
-                : Math.floor((this.player.x - BLOCK_SIZE) / BLOCK_SIZE) * BLOCK_SIZE;
-            by = Math.floor((this.player.y + this.player.height - BLOCK_SIZE) / BLOCK_SIZE) * BLOCK_SIZE;
+            bx = actor.facingRight
+                ? Math.floor((actor.x + actor.width) / BLOCK_SIZE) * BLOCK_SIZE
+                : Math.floor((actor.x - BLOCK_SIZE) / BLOCK_SIZE) * BLOCK_SIZE;
+            by = Math.floor((actor.y + actor.height - BLOCK_SIZE) / BLOCK_SIZE) * BLOCK_SIZE;
         }
 
         if (bx < 0 || bx > GAME_WIDTH - BLOCK_SIZE) return;
@@ -833,13 +1205,13 @@ export class BattleScene extends Phaser.Scene {
         this.blocks.push({
             x: bx,
             y: by,
-            element: this.selectedElement,
+            element: elementKey,
             hp: elem.hp,
             maxHp: elem.hp,
             side: bx >= RIGHT_ZONE_START ? 'right' : 'left',
         });
-        this.player.inventory[this.selectedElement]--;
-        this.player.mana = Math.max(0, this.player.mana - MANA_COST_BLOCK);
+        actor.inventory[elementKey]--;
+        actor.mana = Math.max(0, actor.mana - MANA_COST_BLOCK);
     }
 
     // ─── Damage ─────────────────────────────────────────────
@@ -848,7 +1220,11 @@ export class BattleScene extends Phaser.Scene {
         if (c.health <= 0) {
             c.health = 0;
             this.gameOver = true;
-            this.winner = c.side === 'left' ? 'AI WINS' : 'PLAYER WINS';
+            if (this.battleMode === 'local-1v1') {
+                this.winner = c.side === 'left' ? 'PLAYER 2 WINS' : 'PLAYER 1 WINS';
+            } else {
+                this.winner = c.side === 'left' ? 'AI WINS' : 'PLAYER WINS';
+            }
             this.onGameOver?.(this.winner, this.player.health, this.ai.health);
         }
         this.cameraShakeIntensity = 8;
@@ -874,10 +1250,20 @@ export class BattleScene extends Phaser.Scene {
 
     private endByTimer() {
         this.gameOver = true;
-        if (this.player.health > this.ai.health) this.winner = 'PLAYER WINS';
-        else if (this.ai.health > this.player.health) this.winner = 'AI WINS';
+        if (this.player.health > this.ai.health) this.winner = this.battleMode === 'local-1v1' ? 'PLAYER 1 WINS' : 'PLAYER WINS';
+        else if (this.ai.health > this.player.health) this.winner = this.battleMode === 'local-1v1' ? 'PLAYER 2 WINS' : 'AI WINS';
         else this.winner = 'DRAW';
         this.onGameOver?.(this.winner, this.player.health, this.ai.health);
+    }
+
+    shutdown() {
+        for (const projectile of this.projectiles) {
+            projectile.sprite?.destroy();
+        }
+        if (this.realtimeChannel) {
+            this.realtimeChannel.close();
+            this.realtimeChannel = null;
+        }
     }
 
     // ─── Particles ──────────────────────────────────────────
@@ -1118,56 +1504,27 @@ export class BattleScene extends Phaser.Scene {
         const g = this.gfx;
         for (const p of this.projectiles) {
             const projectileColor = this.getProjectilePrimaryColor(p.elementKey, p.isPlayerProjectile);
-            const highlightColor = this.brightenColor(projectileColor, 0.5);
-            // Trail
+            const trailAlphaBase = 0.42;
+            const trailRadiusBase = 5.2;
+
+            // Keep one shared trail style for every projectile so host/client always see the same shape.
             for (const t of p.trail) {
-                if (p.effectVariant === 0) {
-                    g.fillStyle(projectileColor, t.alpha * 0.45);
-                    g.fillCircle(t.x, t.y, 7 * t.alpha);
-                    g.fillStyle(highlightColor, t.alpha * 0.28);
-                    g.fillCircle(t.x, t.y, 4 * t.alpha);
-                } else if (p.effectVariant === 1) {
-                    g.fillStyle(highlightColor, t.alpha * 0.5);
-                    g.fillCircle(t.x, t.y, 4 * t.alpha);
-                    g.lineStyle(1, projectileColor, t.alpha * 0.4);
-                    g.lineBetween(t.x - 3 * t.alpha, t.y, t.x + 3 * t.alpha, t.y);
-                } else if (p.effectVariant === 2) {
-                    g.fillStyle(projectileColor, t.alpha * 0.28);
-                    g.fillCircle(t.x, t.y, 9 * t.alpha);
-                } else {
-                    g.fillStyle(projectileColor, t.alpha * 0.38);
-                    g.fillCircle(t.x, t.y, 5.5 * t.alpha);
-                    g.fillStyle(highlightColor, t.alpha * 0.2);
-                    g.fillCircle(t.x + 1.5, t.y - 1.5, 2.6 * t.alpha);
-                }
+                const dotAlpha = Math.max(0, t.alpha * trailAlphaBase);
+                const dotRadius = Math.max(0.6, trailRadiusBase * t.alpha);
+                g.fillStyle(projectileColor, dotAlpha);
+                g.fillCircle(t.x, t.y, dotRadius);
             }
 
             if (p.sprite) {
-                if (p.effectVariant === 0) {
-                    g.lineStyle(1.5, projectileColor, 0.35);
-                    g.strokeCircle(p.x, p.y, 12 + Math.sin(p.age * 26) * 1.5);
-                } else if (p.effectVariant === 1) {
-                    g.lineStyle(1.2, highlightColor, 0.4);
-                    g.strokeCircle(p.x, p.y, 10 + Math.sin(p.age * 30) * 2);
-                } else if (p.effectVariant === 2) {
-                    g.fillStyle(projectileColor, 0.16 + Math.sin(p.age * 12) * 0.05);
-                    g.fillCircle(p.x, p.y, 14);
-                } else {
-                    g.lineStyle(1.5, projectileColor, 0.38);
-                    g.strokeCircle(p.x, p.y, 11 + Math.sin(p.age * 22) * 1.4);
-                    g.lineStyle(1, highlightColor, 0.28);
-                    g.strokeCircle(p.x, p.y, 15 + Math.sin(p.age * 18) * 1.8);
-                }
+                this.syncProjectileSpriteTransform(p);
                 continue;
             }
 
-            // Ball
-            g.fillStyle(0xffffff);
-            g.fillCircle(p.x, p.y, 4);
+            // Fallback orb if sprite is temporarily unavailable.
             g.fillStyle(projectileColor);
-            g.fillCircle(p.x, p.y, 7);
+            g.fillCircle(p.x, p.y, 8);
             g.fillStyle(0xffffff, 0.7);
-            g.fillCircle(p.x - 2, p.y - 2, 2);
+            g.fillCircle(p.x - 2.4, p.y - 2.4, 2.2);
         }
     }
 
@@ -1268,6 +1625,7 @@ export class BattleScene extends Phaser.Scene {
         this.uiTexts.get('playerHp')!.setText(`HP ${Math.round(this.player.health)}`);
         this.uiTexts.get('playerMana')!.setText(`MANA ${Math.floor(this.player.mana)}/${MAX_MANA}`);
         this.uiTexts.get('playerLabel')!.setText(`LOADOUT: ${this.selectedShotKeys.map((k) => ELEMENTS[k]?.symbol ?? k).join(' / ')}`);
+        this.uiTexts.get('aiLabel')!.setText(this.battleMode === 'local-1v1' ? 'PLAYER 2' : 'AI');
         this.uiTexts.get('aiHp')!.setText(`HP ${Math.round(this.ai.health)}`);
         this.uiTexts.get('aiMana')!.setText(`MANA ${Math.floor(this.ai.mana)}/${MAX_MANA}`);
 
@@ -1278,6 +1636,13 @@ export class BattleScene extends Phaser.Scene {
         timerText.setColor(this.matchTimer < 60 ? '#f44336' : '#ffffff');
 
         this.uiTexts.get('angleValue')!.setText(`${currentAngle} deg`);
+
+        if (this.battleMode === 'local-1v1') {
+            this.uiTexts.get('inst1')!.setText('P1: WASD move, CLICK shoot, Q/E cycle, SHIFT build');
+            this.uiTexts.get('inst2')!.setText('P2: IJKL move, O shoot, N/M cycle, U build');
+            this.uiTexts.get('inst3')!.setText('P1: mouse aim | P2 auto-aim to P1');
+            this.uiTexts.get('inst4')!.setText('B + arrows: move P1 build cursor');
+        }
 
         // Element counts
         this.selectedElementKeys.forEach((key) => {

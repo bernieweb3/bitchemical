@@ -23,6 +23,7 @@ function App() {
     const [gameKey, setGameKey] = useState(0);
     const [selectedElements, setSelectedElements] = useState<string[]>(['K', 'Fe', 'Br']);
     const [selectedElementImageUrls, setSelectedElementImageUrls] = useState<Record<string, string>>({});
+    const [syncedLoadoutsByPlayer, setSyncedLoadoutsByPlayer] = useState<Record<string, string[]> | null>(null);
     const [isFullscreen, setIsFullscreen] = useState(false);
     const [selectedMode, setSelectedMode] = useState<GameMode>('vs-ai');
     const [playerNickname] = useState(`Player${Math.floor(1000 + Math.random() * 9000)}`);
@@ -37,8 +38,16 @@ function App() {
         }
         setScreen('matchmaking');
     }, []);
+    const handleMatched = useCallback((payload: MatchFoundPayload) => {
+        setMatchedRoom(payload);
+        setScreen('loadout');
+    }, []);
 
-    const handleStartWithLoadout = useCallback((elements: SelectedLoadoutItem[]) => {
+
+    const handleStartWithLoadout = useCallback((
+        elements: SelectedLoadoutItem[],
+        syncContext?: { syncedLoadoutsByPlayer?: Record<string, string[]> },
+    ) => {
         setSelectedElements(elements.map((item) => item.symbol));
         setSelectedElementImageUrls(
             elements.reduce<Record<string, string>>((acc, item) => {
@@ -48,13 +57,9 @@ function App() {
                 return acc;
             }, {})
         );
+        setSyncedLoadoutsByPlayer(syncContext?.syncedLoadoutsByPlayer ?? null);
         setGameKey((k) => k + 1);
         setScreen('game');
-    }, []);
-
-    const handleMatched = useCallback((payload: MatchFoundPayload) => {
-        setMatchedRoom(payload);
-        setScreen('loadout');
     }, []);
 
     const handleGameOver = useCallback((winner: string, playerHp: number, aiHp: number) => {
@@ -75,6 +80,7 @@ function App() {
 
     const handleMainMenu = useCallback(() => {
         setMatchedRoom(null);
+        setSyncedLoadoutsByPlayer(null);
         setSelectedMode('vs-ai');
         setScreen('menu');
     }, []);
@@ -95,6 +101,7 @@ function App() {
 
     const handleExitGame = useCallback(() => {
         setMatchedRoom(null);
+        setSyncedLoadoutsByPlayer(null);
         setScreen('menu');
     }, []);
 
@@ -114,6 +121,13 @@ function App() {
                 <ElementLoadoutScreen
                     onStartGame={handleStartWithLoadout}
                     onBack={() => setScreen(isMultiplayerMode(selectedMode) ? 'matchmaking' : 'menu')}
+                    multiplayerSync={isMultiplayerMode(selectedMode) && matchedRoom
+                        ? {
+                            roomId: matchedRoom.roomId,
+                            playerId: matchedRoom.playerId,
+                            expectedPlayers: matchedRoom.players.length,
+                        }
+                        : null}
                 />
             )}
             {screen === 'matchmaking' && selectedMode !== 'vs-ai' && (
@@ -139,6 +153,7 @@ function App() {
                         onGameOver={handleGameOver}
                         selectedElements={selectedElements}
                         selectedElementImageUrls={selectedElementImageUrls}
+                        syncedLoadoutsByPlayer={syncedLoadoutsByPlayer}
                         gameMode={selectedMode}
                         multiplayerMatch={isMultiplayerMode(selectedMode) ? matchedRoom : null}
                         fullViewport
