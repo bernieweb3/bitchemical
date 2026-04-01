@@ -9,6 +9,7 @@ import './MainMenu.css';
 export function MainMenu({ onStartGame }: MainMenuProps) {
     const gameModes = [
         { mode: 'vs-ai' as const, name: 'Choi voi may', accent: 'mode-solo', note: '1vAI tactical duel', icon: '🤖', badge: 'AI' },
+        { mode: 'test-vs-ai' as const, name: 'Test vs AI', accent: 'mode-test', note: 'Ban test giong het dau voi may', icon: '🧪', badge: 'TEST' },
         { mode: 'pvp-1v1' as const, name: 'PVP 1v1', accent: 'mode-duo', note: 'Dau 1 doi 1 real-time', icon: '⚔', badge: '1V1' },
     ];
 

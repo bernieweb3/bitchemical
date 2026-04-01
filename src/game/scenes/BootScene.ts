@@ -166,8 +166,20 @@ function buildSortedFrameAssets(rawUrls: Record<string, string>) {
         });
 }
 
+function pickEvenlySpacedFrames<T>(frames: T[], desiredCount: number) {
+    if (frames.length <= desiredCount) return frames;
+    const result: T[] = [];
+    const maxIndex = frames.length - 1;
+    for (let i = 0; i < desiredCount; i++) {
+        const idx = Math.round((i * maxIndex) / Math.max(1, desiredCount - 1));
+        result.push(frames[idx]);
+    }
+    return result;
+}
+
 const IDLE_FRAME_ASSETS = buildSortedFrameAssets(rawIdleImageUrls);
 const RUN_FRAME_ASSETS = buildSortedFrameAssets(rawRunImageUrls);
+const RUN_ANIMATION_FRAME_ASSETS = pickEvenlySpacedFrames(RUN_FRAME_ASSETS, 6);
 
 export class BootScene extends Phaser.Scene {
     private projectileSymbolsToPrepare: string[] = [];
@@ -180,7 +192,7 @@ export class BootScene extends Phaser.Scene {
         IDLE_FRAME_ASSETS.forEach((asset, index) => {
             this.load.image(`${IDLE_FRAME_KEY_PREFIX}${index}`, asset.url);
         });
-        RUN_FRAME_ASSETS.forEach((asset, index) => {
+        RUN_ANIMATION_FRAME_ASSETS.forEach((asset, index) => {
             this.load.image(`${RUN_FRAME_KEY_PREFIX}${index}`, asset.url);
         });
 
@@ -360,11 +372,11 @@ export class BootScene extends Phaser.Scene {
             });
         }
 
-        if (!this.anims.exists(RUN_ANIM_KEY) && RUN_FRAME_ASSETS.length > 0) {
+        if (!this.anims.exists(RUN_ANIM_KEY) && RUN_ANIMATION_FRAME_ASSETS.length > 0) {
             this.anims.create({
                 key: RUN_ANIM_KEY,
-                frames: RUN_FRAME_ASSETS.map((_, index) => ({ key: `${RUN_FRAME_KEY_PREFIX}${index}` })),
-                frameRate: 22,
+                frames: RUN_ANIMATION_FRAME_ASSETS.map((_, index) => ({ key: `${RUN_FRAME_KEY_PREFIX}${index}` })),
+                frameRate: 14,
                 repeat: -1,
             });
         }

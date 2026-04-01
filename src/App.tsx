@@ -31,7 +31,7 @@ function App() {
 
     const handleStartGame = useCallback((mode: GameMode) => {
         setSelectedMode(mode);
-        if (mode === 'vs-ai') {
+        if (!isMultiplayerMode(mode)) {
             setMatchedRoom(null);
             setScreen('loadout');
             return;
@@ -130,7 +130,7 @@ function App() {
                         : null}
                 />
             )}
-            {screen === 'matchmaking' && selectedMode !== 'vs-ai' && (
+            {screen === 'matchmaking' && isMultiplayerMode(selectedMode) && (
                 <MatchmakingScreen
                     mode={selectedMode}
                     nickname={playerNickname}

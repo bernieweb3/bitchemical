@@ -18,7 +18,11 @@ import {
     BLOCK_SIZE,
     MATCH_DURATION,
     PLATFORMS,
+    CHARACTER_SPRITE_WIDTH,
+    CHARACTER_SPRITE_HEIGHT,
+    CHARACTER_CROUCH_SCALE_Y,
 } from '../config';
+import type { PlatformDef } from '../config';
 import { ELEMENTS, ELEMENT_KEYS, STARTING_INVENTORY } from '../data/elements';
 
 const IDLE_TEXTURE_KEY = 'scientist_idle_frame_0';
@@ -31,11 +35,13 @@ interface CharacterState {
     y: number;
     velX: number;
     velY: number;
+    moveInputX: number;
     width: number;
     height: number;
     health: number;
     mana: number;
     onGround: boolean;
+    jumpsUsed: number;
     crouching: boolean;
     facingRight: boolean;
     side: 'left' | 'right';
@@ -122,6 +128,11 @@ interface RealtimeSnapshotPayload {
 export class BattleScene extends Phaser.Scene {
     private readonly projectileDisplaySize = 44;
     private readonly blockDamage = 30;
+    private readonly minBlockSpacing = 8;
+    private readonly groundAccel = 1800;
+    private readonly airAccel = 950;
+    private readonly groundDecel = 2400;
+    private readonly airDecel = 700;
 
     private player!: CharacterState;
     private ai!: CharacterState;
@@ -178,6 +189,8 @@ export class BattleScene extends Phaser.Scene {
 
     private aiLastPlayerX = 0;
     private aiLastPlayerY = 0;
+    private readonly aiJumpCooldownMs = 420;
+    private lastAiJumpAt = 0;
     private playerVelocityHistory: { vx: number; vy: number }[] = [];
     private readonly projectileGravityScale = 0.18;
     private readonly playerShotSpeedMultiplier = 1.25;
@@ -199,6 +212,7 @@ export class BattleScene extends Phaser.Scene {
         aimY: 0,
         selectedElement: 'C',
     };
+    private remoteUpWasDown = false;
     private networkInput: RealtimeInputPayload = {
         left: false,
         right: false,
@@ -213,6 +227,17 @@ export class BattleScene extends Phaser.Scene {
     private snapshotAccumulator = 0;
     private projectileIdCounter = 0;
     private syncedLoadoutsByPlayer: Record<string, string[]> | null = null;
+    private isParkourTestMode = false;
+    private hasOpponent = true;
+    private parkourPlatforms: PlatformDef[] = [];
+    private parkourScrollSpeed = 56;
+    private parkourHazardY = GAME_HEIGHT + 120;
+    private readonly parkourHazardRiseSpeed = 6;
+    private readonly parkourFallMargin = 28;
+    private readonly parkourPlatformGapX = 170;
+    private readonly parkourPlatformGapY = 62;
+    private readonly parkourScrollDelayMs = 10000;
+    private parkourElapsedMs = 0;
 
     // Phaser Graphics objects
     private gfx!: Phaser.GameObjects.Graphics;
@@ -296,6 +321,13 @@ export class BattleScene extends Phaser.Scene {
         }
 
         this.selectedElement = this.selectedElementKeys[0] ?? 'C';
+
+        const registryGameMode = this.registry.get('gameMode') as string | undefined;
+        this.isParkourTestMode = registryGameMode === 'test-vs-ai';
+        this.hasOpponent = !this.isParkourTestMode;
+        if (this.isParkourTestMode) {
+            this.battleMode = 'vs-ai';
+        }
     }
 
     create() {
@@ -315,13 +347,21 @@ export class BattleScene extends Phaser.Scene {
         this.cameraShakeY = 0;
         this.lastPlayerShotAt = -this.playerShotCooldownMs;
         this.lastOpponentShotAt = -this.playerShotCooldownMs;
+        this.lastAiJumpAt = -this.aiJumpCooldownMs;
         this.opponentSelectedElement = this.opponentElementKeys[0] ?? 'C';
         this.snapshotAccumulator = 0;
         this.projectileIdCounter = 0;
+        this.parkourHazardY = GAME_HEIGHT + 120;
+        this.remoteUpWasDown = false;
+        this.parkourElapsedMs = 0;
 
         // Characters
-        this.player = this.createChar(170, 520, 'left', this.selectedElementKeys);
-        this.ai = this.createChar(1360, 520, 'right', this.opponentElementKeys);
+        const spawnY = this.isParkourTestMode ? GAME_HEIGHT - 220 : 520;
+        this.player = this.createChar(170, spawnY, 'left', this.selectedElementKeys);
+        this.ai = this.createChar(1360, spawnY, 'right', this.opponentElementKeys);
+        if (this.isParkourTestMode) {
+            this.initializeParkourPlatforms();
+        }
         this.aiLastPlayerX = this.player.x;
         this.aiLastPlayerY = this.player.y;
         this.playerVelocityHistory = [];
@@ -334,6 +374,7 @@ export class BattleScene extends Phaser.Scene {
         this.aiSprite = this.add.sprite(0, 0, IDLE_TEXTURE_KEY).setDepth(30).setOrigin(0.5, 1);
         this.playerSprite.play(IDLE_ANIM_KEY);
         this.aiSprite.play(IDLE_ANIM_KEY);
+        this.aiSprite.setVisible(this.hasOpponent);
 
         // Input keys
         this.keyA = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.A);
@@ -496,8 +537,8 @@ export class BattleScene extends Phaser.Scene {
         });
 
         return {
-            x, y, velX: 0, velY: 0, width: 30, height: 46,
-            health: MAX_HEALTH, mana: MAX_MANA, onGround: false, crouching: false,
+            x, y, velX: 0, velY: 0, moveInputX: 0, width: 30, height: 46,
+            health: MAX_HEALTH, mana: MAX_MANA, onGround: false, jumpsUsed: 0, crouching: false,
             facingRight: side === 'left', side,
             animFrame: 0, animTimer: 0,
             inventory,
@@ -578,6 +619,14 @@ export class BattleScene extends Phaser.Scene {
     // ═══════════════════════════════════════════════════════════
     update(_time: number, delta: number) {
         const dt = delta / 1000;
+
+        if (!this.gameOver && this.isParkourTestMode) {
+            this.parkourElapsedMs += delta;
+        }
+
+        if (!this.gameOver && this.isParkourTestMode && this.battleMode !== 'local-1v1-client') {
+            this.updateParkourCourse(dt);
+        }
         this.gfx.clear();
 
         // Draw world
@@ -598,31 +647,37 @@ export class BattleScene extends Phaser.Scene {
 
             if (this.battleMode === 'local-1v1-host') {
                 this.applyRemoteInputToOpponent();
-                this.updateChar(this.ai, dt);
+                if (this.hasOpponent) this.updateChar(this.ai, dt);
                 this.snapshotAccumulator += delta;
                 if (this.snapshotAccumulator >= 16) {
                     this.snapshotAccumulator = 0;
                     this.broadcastRealtimeSnapshot();
                 }
             } else if (this.battleMode === 'local-1v1') {
-                this.updateChar(this.ai, dt);
+                if (this.hasOpponent) this.updateChar(this.ai, dt);
             } else if (this.battleMode === 'local-1v1-client') {
                 // Client receives state from host and only renders it.
             } else {
-                this.updateAI(dt);
-                this.updateChar(this.ai, dt);
+                if (this.hasOpponent) {
+                    this.updateAI(dt);
+                    this.updateChar(this.ai, dt);
+                }
             }
 
             if (this.battleMode !== 'local-1v1-client') {
-                this.enforceFacingTowardOpponent();
                 this.updateProjectiles(dt);
                 this.updateParticles(dt);
+                if (this.isParkourTestMode) {
+                    this.evaluateParkourFailState();
+                }
                 this.updateCameraShake();
             }
         }
 
         this.syncCharacterSprite(this.player, this.playerSprite);
-        this.syncCharacterSprite(this.ai, this.aiSprite);
+        if (this.hasOpponent) {
+            this.syncCharacterSprite(this.ai, this.aiSprite);
+        }
         this.drawProjectiles();
         this.drawParticles();
         this.drawBlockCursor();
@@ -657,15 +712,19 @@ export class BattleScene extends Phaser.Scene {
 
     private applyRemoteInputToOpponent() {
         this.ai.crouching = this.remoteInput.down;
-        if (this.remoteInput.left) this.ai.velX = -MOVE_SPEED;
-        if (this.remoteInput.right) this.ai.velX = MOVE_SPEED;
-        if (this.remoteInput.up && this.ai.onGround) this.ai.velY = JUMP_FORCE;
+        this.ai.moveInputX = (this.remoteInput.right ? 1 : 0) - (this.remoteInput.left ? 1 : 0);
+        const remoteJumpPressed = this.remoteInput.up && !this.remoteUpWasDown;
+        if (remoteJumpPressed && this.tryCharacterJump(this.ai)) {
+            this.ai.velY = JUMP_FORCE;
+        }
+        this.remoteUpWasDown = this.remoteInput.up;
 
         if (this.remoteInput.selectedElement && this.opponentElementKeys.includes(this.remoteInput.selectedElement)) {
             this.opponentSelectedElement = this.remoteInput.selectedElement;
         }
 
         if (this.remoteInput.shoot) {
+            this.ai.facingRight = this.getShootFacingByMoveOrAim(this.ai, this.remoteInput.aimX);
             const angle = this.getAngleFromAimFor(this.ai, this.remoteInput.aimX, this.remoteInput.aimY);
             const shotElement = this.opponentElementKeys.length > 0
                 ? Phaser.Utils.Array.GetRandom(this.opponentElementKeys)
@@ -687,6 +746,12 @@ export class BattleScene extends Phaser.Scene {
         const dy = aimY - muzzle.y;
         const angleRad = Math.atan2(-dy, Math.max(1, Math.abs(dx)));
         return Phaser.Math.Clamp(Phaser.Math.RadToDeg(angleRad), 0, 90);
+    }
+
+    private getShootFacingByMoveOrAim(c: CharacterState, aimX: number) {
+        if (c.moveInputX > 0) return true;
+        if (c.moveInputX < 0) return false;
+        return aimX >= (c.x + c.width / 2);
     }
 
     private broadcastRealtimeSnapshot() {
@@ -744,15 +809,13 @@ export class BattleScene extends Phaser.Scene {
 
     // ─── Input ───────────────────────────────────────────────
     private handleInput() {
-        if (this.keyA.isDown) { this.player.velX = -MOVE_SPEED; }
-        if (this.keyD.isDown) { this.player.velX = MOVE_SPEED; }
-        if (this.keyW.isDown && this.player.onGround) { this.player.velY = JUMP_FORCE; }
+        this.player.moveInputX = (this.keyD.isDown ? 1 : 0) - (this.keyA.isDown ? 1 : 0);
+        if (Phaser.Input.Keyboard.JustDown(this.keyW) && this.tryCharacterJump(this.player)) { this.player.velY = JUMP_FORCE; }
         this.player.crouching = this.keyS.isDown;
 
         if (this.battleMode === 'local-1v1') {
-            if (this.keyJ.isDown) { this.ai.velX = -MOVE_SPEED; }
-            if (this.keyL.isDown) { this.ai.velX = MOVE_SPEED; }
-            if (this.keyI.isDown && this.ai.onGround) { this.ai.velY = JUMP_FORCE; }
+            this.ai.moveInputX = (this.keyL.isDown ? 1 : 0) - (this.keyJ.isDown ? 1 : 0);
+            if (Phaser.Input.Keyboard.JustDown(this.keyI) && this.tryCharacterJump(this.ai)) { this.ai.velY = JUMP_FORCE; }
             this.ai.crouching = this.keyK.isDown;
         }
 
@@ -802,7 +865,7 @@ export class BattleScene extends Phaser.Scene {
         const pointerWorldX = pointer.x + camera.scrollX;
         const pointerWorldY = pointer.y + camera.scrollY;
         this.applyAimTarget(pointerWorldX, pointerWorldY);
-        this.enforceFacingTowardOpponent();
+        this.player.facingRight = this.getShootFacingByMoveOrAim(this.player, pointerWorldX);
 
         const shotElement = Phaser.Utils.Array.GetRandom(this.selectedShotKeys);
         const shotFired = this.shootProjectile(this.player, this.getCurrentPlayerAngle(), true, this.playerShotSpeedMultiplier, shotElement);
@@ -815,6 +878,7 @@ export class BattleScene extends Phaser.Scene {
     }
 
     private handleOpponentShoot() {
+        if (!this.hasOpponent) return;
         const now = this.time.now;
         if (now - this.lastOpponentShotAt < this.playerShotCooldownMs) {
             return;
@@ -832,10 +896,13 @@ export class BattleScene extends Phaser.Scene {
     private regenMana(dt: number) {
         const regenAmount = MANA_REGEN_PER_SECOND * dt;
         this.player.mana = Phaser.Math.Clamp(this.player.mana + regenAmount, 0, MAX_MANA);
-        this.ai.mana = Phaser.Math.Clamp(this.ai.mana + regenAmount, 0, MAX_MANA);
+        if (this.hasOpponent) {
+            this.ai.mana = Phaser.Math.Clamp(this.ai.mana + regenAmount, 0, MAX_MANA);
+        }
     }
 
     private enforceFacingTowardOpponent() {
+        if (!this.hasOpponent) return;
         this.player.facingRight = this.ai.x >= this.player.x;
         this.ai.facingRight = this.player.x >= this.ai.x;
     }
@@ -890,15 +957,36 @@ export class BattleScene extends Phaser.Scene {
 
     // ─── Character Physics ──────────────────────────────────
     private updateChar(c: CharacterState, dt: number) {
+        const moveSpeedScale = c.crouching ? 0.55 : 1;
+        const targetVelX = c.moveInputX * MOVE_SPEED * moveSpeedScale;
+        const accel = c.onGround ? this.groundAccel : this.airAccel;
+        const decel = c.onGround ? this.groundDecel : this.airDecel;
+        const rate = c.moveInputX === 0 ? decel : accel;
+        c.velX = this.approach(c.velX, targetVelX, rate * dt);
+        if (c.moveInputX > 0) c.facingRight = true;
+        else if (c.moveInputX < 0) c.facingRight = false;
+
+        const wasOnGround = c.onGround;
+        const previousFeetY = c.y + c.height;
+        const platformDrift = (this.isParkourTestMode && this.isParkourScrollActive()) ? (this.parkourScrollSpeed * dt + 2) : 0;
+
         c.velY += GRAVITY * dt;
         c.x += c.velX * dt;
         c.y += c.velY * dt;
 
         c.onGround = false;
-        for (const p of PLATFORMS) {
-            if (c.x < p.x + p.width && c.x + c.width > p.x &&
-                c.y + c.height >= p.y && c.y + c.height <= p.y + p.height + c.velY * dt + 5) {
+        for (const p of this.getActivePlatforms()) {
+            const overlapX = c.x < p.x + p.width && c.x + c.width > p.x;
+            const feetY = c.y + c.height;
+            const canSnapToMovingPlatform = wasOnGround
+                && overlapX
+                && previousFeetY <= p.y + platformDrift
+                && previousFeetY >= p.y - (platformDrift + 4)
+                && c.velY >= -20;
+
+            if ((overlapX && feetY >= p.y && feetY <= p.y + p.height + c.velY * dt + 5) || canSnapToMovingPlatform) {
                 if (c.velY > 0) { c.y = p.y - c.height; c.velY = 0; c.onGround = true; }
+                else if (canSnapToMovingPlatform) { c.y = p.y - c.height; c.velY = 0; c.onGround = true; }
             }
         }
         for (const b of this.blocks) {
@@ -908,21 +996,45 @@ export class BattleScene extends Phaser.Scene {
             }
         }
 
+        if (c.onGround) {
+            c.jumpsUsed = 0;
+        }
+
         if (c.x < 0) c.x = 0;
         if (c.x + c.width > GAME_WIDTH) c.x = GAME_WIDTH - c.width;
 
-        c.velX *= 0.85;
         c.animTimer++;
         if (c.animTimer > 8) { c.animTimer = 0; c.animFrame = (c.animFrame + 1) % 4; }
+    }
+
+    private isParkourScrollActive() {
+        return this.parkourElapsedMs >= this.parkourScrollDelayMs;
+    }
+
+    private approach(current: number, target: number, maxDelta: number) {
+        if (current < target) return Math.min(current + maxDelta, target);
+        if (current > target) return Math.max(current - maxDelta, target);
+        return target;
+    }
+
+    private tryCharacterJump(c: CharacterState) {
+        if (c.onGround) {
+            c.jumpsUsed = 0;
+        }
+        if (c.jumpsUsed >= 2) {
+            return false;
+        }
+        c.jumpsUsed += 1;
+        return true;
     }
 
     private syncCharacterSprite(c: CharacterState, sprite: Phaser.GameObjects.Sprite) {
         const baseX = c.x + c.width / 2;
         const baseY = c.y + c.height + 2;
-        const spriteScaleY = c.crouching ? 0.9 : 1;
+        const spriteScaleY = c.crouching ? CHARACTER_CROUCH_SCALE_Y : 1;
 
         sprite.setPosition(baseX, baseY);
-        sprite.setDisplaySize(92, 130 * spriteScaleY);
+        sprite.setDisplaySize(CHARACTER_SPRITE_WIDTH, CHARACTER_SPRITE_HEIGHT * spriteScaleY);
         sprite.setFlipX(!c.facingRight);
 
         const isRunning = c.onGround && Math.abs(c.velX) >= 20;
@@ -1091,7 +1203,7 @@ export class BattleScene extends Phaser.Scene {
             }
 
             // Platform collision
-            for (const plat of PLATFORMS) {
+            for (const plat of this.getActivePlatforms()) {
                 if (p.x > plat.x && p.x < plat.x + plat.width && p.y > plat.y && p.y < plat.y + plat.height) {
                     p.active = false;
                     p.sprite?.destroy();
@@ -1120,6 +1232,9 @@ export class BattleScene extends Phaser.Scene {
             if (!p.active) continue;
 
             // Character collision
+            if (!this.hasOpponent && p.isPlayerProjectile) {
+                continue;
+            }
             const target = p.isPlayerProjectile ? this.ai : this.player;
             const hitbox = this.getCharacterHitbox(target);
             if (p.x > hitbox.x && p.x < hitbox.x + hitbox.width && p.y > hitbox.y && p.y < hitbox.y + hitbox.height) {
@@ -1201,7 +1316,12 @@ export class BattleScene extends Phaser.Scene {
 
         if (bx < 0 || bx > GAME_WIDTH - BLOCK_SIZE) return;
         if (by < 0 || by > GAME_HEIGHT - BLOCK_SIZE) return;
-        for (const b of this.blocks) { if (b.x === bx && b.y === by) return; }
+        const minDistance = BLOCK_SIZE + this.minBlockSpacing;
+        for (const b of this.blocks) {
+            const dx = Math.abs(b.x - bx);
+            const dy = Math.abs(b.y - by);
+            if (dx < minDistance && dy < minDistance) return;
+        }
         this.blocks.push({
             x: bx,
             y: by,
@@ -1220,7 +1340,9 @@ export class BattleScene extends Phaser.Scene {
         if (c.health <= 0) {
             c.health = 0;
             this.gameOver = true;
-            if (this.battleMode === 'local-1v1') {
+            if (!this.hasOpponent) {
+                this.winner = c.side === 'left' ? 'GAME OVER' : 'PLAYER WINS';
+            } else if (this.battleMode === 'local-1v1') {
                 this.winner = c.side === 'left' ? 'PLAYER 2 WINS' : 'PLAYER 1 WINS';
             } else {
                 this.winner = c.side === 'left' ? 'AI WINS' : 'PLAYER WINS';
@@ -1233,7 +1355,8 @@ export class BattleScene extends Phaser.Scene {
 
     private createExplosion(cx: number, cy: number) {
         const radius = 80;
-        for (const c of [this.player, this.ai]) {
+        const targets = this.hasOpponent ? [this.player, this.ai] : [this.player];
+        for (const c of targets) {
             const dx = (c.x + c.width / 2) - cx;
             const dy = (c.y + c.height / 2) - cy;
             if (Math.sqrt(dx * dx + dy * dy) < radius) this.takeDamage(c, 20);
@@ -1250,7 +1373,8 @@ export class BattleScene extends Phaser.Scene {
 
     private endByTimer() {
         this.gameOver = true;
-        if (this.player.health > this.ai.health) this.winner = this.battleMode === 'local-1v1' ? 'PLAYER 1 WINS' : 'PLAYER WINS';
+        if (!this.hasOpponent) this.winner = 'SURVIVED';
+        else if (this.player.health > this.ai.health) this.winner = this.battleMode === 'local-1v1' ? 'PLAYER 1 WINS' : 'PLAYER WINS';
         else if (this.ai.health > this.player.health) this.winner = this.battleMode === 'local-1v1' ? 'PLAYER 2 WINS' : 'AI WINS';
         else this.winner = 'DRAW';
         this.onGameOver?.(this.winner, this.player.health, this.ai.health);
@@ -1306,7 +1430,7 @@ export class BattleScene extends Phaser.Scene {
     private updateAI(dt: number) {
         if (this.gameOver) return;
         const a = this.ai;
-        this.enforceFacingTowardOpponent();
+        const now = this.time.now;
         a.aiTimer++;
         a.aiShootTimer++;
 
@@ -1353,13 +1477,48 @@ export class BattleScene extends Phaser.Scene {
         if (a.aiTimer > 50) {
             a.aiTimer = 0;
             const r = Math.random();
-            if (r < 0.4) a.velX = MOVE_SPEED * 0.7;
-            else if (r < 0.8) a.velX = -MOVE_SPEED * 0.7;
-            else a.velX = 0;
-            if (a.onGround && Math.random() < 0.15) a.velY = JUMP_FORCE;
+            if (r < 0.4) a.moveInputX = 1;
+            else if (r < 0.8) a.moveInputX = -1;
+            else a.moveInputX = 0;
         }
-        if (a.x < 20) a.velX = MOVE_SPEED * 0.7;
-        else if (a.x > GAME_WIDTH - 70) a.velX = -MOVE_SPEED * 0.7;
+
+        const aiFeetY = a.y + a.height;
+        const playerFeetY = this.player.y + this.player.height;
+        const playerHigher = playerFeetY < aiFeetY - 28;
+        const jumpReady = now - this.lastAiJumpAt >= this.aiJumpCooldownMs;
+        const nearBlockAhead = this.blocks.some((b) => {
+            const aheadX = a.facingRight ? a.x + a.width + 12 : a.x - 12;
+            const sameLane = b.y < aiFeetY && b.y + BLOCK_SIZE > a.y;
+            const isAhead = a.facingRight
+                ? (b.x <= aheadX && b.x + BLOCK_SIZE >= aheadX)
+                : (b.x <= aheadX && b.x + BLOCK_SIZE >= aheadX);
+            return sameLane && isAhead;
+        });
+        const nearEdge = this.isNearPlatformEdge(a);
+
+        if (a.onGround && jumpReady && (playerHigher || nearBlockAhead || nearEdge || Math.random() < 0.08)) {
+            a.velY = JUMP_FORCE;
+            this.lastAiJumpAt = now;
+        }
+
+        if (a.x < 20) a.moveInputX = 1;
+        else if (a.x > GAME_WIDTH - 70) a.moveInputX = -1;
+    }
+
+    private isNearPlatformEdge(c: CharacterState) {
+        const feetY = c.y + c.height;
+        const centerX = c.x + c.width / 2;
+        const support = this.getActivePlatforms().find((p) => (
+            centerX > p.x && centerX < p.x + p.width && Math.abs(feetY - p.y) < 12
+        ));
+
+        if (!support) return false;
+
+        const edgeMargin = 22;
+        if (c.facingRight) {
+            return support.x + support.width - centerX < edgeMargin;
+        }
+        return centerX - support.x < edgeMargin;
     }
 
     private simShot(sx: number, sy: number, angle: number, tx: number, ty: number, tw: number, th: number) {
@@ -1419,19 +1578,104 @@ export class BattleScene extends Phaser.Scene {
 
     private drawPlatforms() {
         const g = this.gfx;
-        for (const p of PLATFORMS) {
+        for (const p of this.getActivePlatforms()) {
             if (p.height > 50) {
                 g.fillStyle(0x2d3748);
                 g.fillRect(p.x, p.y, p.width, p.height);
                 g.fillStyle(0x48bb78);
                 g.fillRect(p.x, p.y, p.width, 6);
             } else {
-                g.fillStyle(0x5a6577);
+                g.fillStyle(this.isParkourTestMode ? 0x2f445e : 0x5a6577);
                 g.fillRect(p.x, p.y, p.width, p.height);
             }
             g.lineStyle(1, 0xa0aec0, 0.5);
             g.strokeRect(p.x, p.y, p.width, p.height);
         }
+
+    }
+
+    private getActivePlatforms() {
+        return this.isParkourTestMode ? this.parkourPlatforms : PLATFORMS;
+    }
+
+    private initializeParkourPlatforms() {
+        this.parkourPlatforms = [];
+        this.parkourPlatforms.push({ x: 30, y: GAME_HEIGHT - 120, width: 330, height: 20, side: 'left' });
+        this.parkourPlatforms.push({ x: GAME_WIDTH - 360, y: GAME_HEIGHT - 120, width: 330, height: 20, side: 'right' });
+        const spacing = 92;
+
+        for (let i = 0; i < 12; i++) {
+            const y = GAME_HEIGHT - 210 - i * spacing;
+            const leftPlatform: PlatformDef = { x: 50, y, width: 150, height: 18, side: 'left' };
+            const rightPlatform: PlatformDef = { x: 860, y: y - spacing / 2, width: 150, height: 18, side: 'right' };
+            this.repositionParkourPlatform(leftPlatform, leftPlatform.y - 12, leftPlatform.y + 12);
+            this.repositionParkourPlatform(rightPlatform, rightPlatform.y - 12, rightPlatform.y + 12);
+            this.parkourPlatforms.push(leftPlatform);
+            this.parkourPlatforms.push(rightPlatform);
+        }
+    }
+
+    private updateParkourCourse(dt: number) {
+        if (!this.isParkourScrollActive()) {
+            return;
+        }
+
+        for (const platform of this.parkourPlatforms) {
+            platform.y += this.parkourScrollSpeed * dt;
+            if (platform.y > GAME_HEIGHT + 60) {
+                this.repositionParkourPlatform(platform, -900, -120);
+            }
+        }
+
+        this.parkourHazardY = Math.max(140, this.parkourHazardY - this.parkourHazardRiseSpeed * dt);
+    }
+
+    private repositionParkourPlatform(platform: PlatformDef, minY: number, maxY: number) {
+        let candidateX = platform.x;
+        let candidateY = Phaser.Math.Between(minY, maxY);
+        for (let attempt = 0; attempt < 28; attempt++) {
+            candidateX = platform.side === 'left'
+                ? Phaser.Math.Between(50, 620)
+                : Phaser.Math.Between(860, 1430);
+            candidateY = Phaser.Math.Between(minY, maxY);
+            if (!this.hasNearbyParkourPlatform(platform, candidateX, candidateY)) {
+                break;
+            }
+        }
+        platform.x = candidateX;
+        platform.y = candidateY;
+    }
+
+    private hasNearbyParkourPlatform(target: PlatformDef, x: number, y: number) {
+        return this.parkourPlatforms.some((p) => (
+            p !== target
+            && p.side === target.side
+            && Math.abs(p.x - x) < this.parkourPlatformGapX
+            && Math.abs(p.y - y) < this.parkourPlatformGapY
+        ));
+    }
+
+    private evaluateParkourFailState() {
+        if (this.gameOver) return;
+
+        const playerFell = this.player.y > GAME_HEIGHT + this.parkourFallMargin;
+        const opponentFell = this.hasOpponent
+            ? (this.ai.y > GAME_HEIGHT + this.parkourFallMargin)
+            : false;
+
+        if (!playerFell && (!this.hasOpponent || !opponentFell)) return;
+
+        this.gameOver = true;
+        if (!this.hasOpponent) {
+            this.winner = 'GAME OVER';
+        } else if (playerFell && opponentFell) {
+            this.winner = 'DRAW';
+        } else if (playerFell) {
+            this.winner = 'PLAYER 2 WINS';
+        } else {
+            this.winner = 'PLAYER 1 WINS';
+        }
+        this.onGameOver?.(this.winner, this.player.health, this.ai.health);
     }
 
     private drawBlocks() {
@@ -1582,15 +1826,17 @@ export class BattleScene extends Phaser.Scene {
         g.fillStyle(0x29b6f6); g.fillRect(22, 45, (this.player.mana / MAX_MANA) * 196, 8);
         g.lineStyle(1, 0x4fc3f7); g.strokeRect(20, 43, 200, 12);
 
-        // AI HP bar
-        g.fillStyle(0x222222); g.fillRect(GAME_WIDTH - 220, 18, 200, 22);
-        g.fillStyle(0xf44336); g.fillRect(GAME_WIDTH - 218, 20, (this.ai.health / MAX_HEALTH) * 196, 18);
-        g.lineStyle(1, 0xaaaaaa); g.strokeRect(GAME_WIDTH - 220, 18, 200, 22);
+        if (this.hasOpponent) {
+            // AI HP bar
+            g.fillStyle(0x222222); g.fillRect(GAME_WIDTH - 220, 18, 200, 22);
+            g.fillStyle(0xf44336); g.fillRect(GAME_WIDTH - 218, 20, (this.ai.health / MAX_HEALTH) * 196, 18);
+            g.lineStyle(1, 0xaaaaaa); g.strokeRect(GAME_WIDTH - 220, 18, 200, 22);
 
-        // AI mana bar
-        g.fillStyle(0x1b2533); g.fillRect(GAME_WIDTH - 220, 43, 200, 12);
-        g.fillStyle(0x29b6f6); g.fillRect(GAME_WIDTH - 218, 45, (this.ai.mana / MAX_MANA) * 196, 8);
-        g.lineStyle(1, 0x4fc3f7); g.strokeRect(GAME_WIDTH - 220, 43, 200, 12);
+            // AI mana bar
+            g.fillStyle(0x1b2533); g.fillRect(GAME_WIDTH - 220, 43, 200, 12);
+            g.fillStyle(0x29b6f6); g.fillRect(GAME_WIDTH - 218, 45, (this.ai.mana / MAX_MANA) * 196, 8);
+            g.lineStyle(1, 0x4fc3f7); g.strokeRect(GAME_WIDTH - 220, 43, 200, 12);
+        }
 
         // Timer bg
         g.fillStyle(0x000000, 0.7); g.fillRect(GAME_WIDTH / 2 - 45, 10, 90, 30);
@@ -1625,9 +1871,14 @@ export class BattleScene extends Phaser.Scene {
         this.uiTexts.get('playerHp')!.setText(`HP ${Math.round(this.player.health)}`);
         this.uiTexts.get('playerMana')!.setText(`MANA ${Math.floor(this.player.mana)}/${MAX_MANA}`);
         this.uiTexts.get('playerLabel')!.setText(`LOADOUT: ${this.selectedShotKeys.map((k) => ELEMENTS[k]?.symbol ?? k).join(' / ')}`);
-        this.uiTexts.get('aiLabel')!.setText(this.battleMode === 'local-1v1' ? 'PLAYER 2' : 'AI');
-        this.uiTexts.get('aiHp')!.setText(`HP ${Math.round(this.ai.health)}`);
-        this.uiTexts.get('aiMana')!.setText(`MANA ${Math.floor(this.ai.mana)}/${MAX_MANA}`);
+        this.uiTexts.get('aiLabel')!.setVisible(this.hasOpponent);
+        this.uiTexts.get('aiHp')!.setVisible(this.hasOpponent);
+        this.uiTexts.get('aiMana')!.setVisible(this.hasOpponent);
+        if (this.hasOpponent) {
+            this.uiTexts.get('aiLabel')!.setText(this.battleMode === 'local-1v1' ? 'PLAYER 2' : 'AI');
+            this.uiTexts.get('aiHp')!.setText(`HP ${Math.round(this.ai.health)}`);
+            this.uiTexts.get('aiMana')!.setText(`MANA ${Math.floor(this.ai.mana)}/${MAX_MANA}`);
+        }
 
         const mins = Math.floor(this.matchTimer / 60);
         const secs = this.matchTimer % 60;
@@ -1637,11 +1888,23 @@ export class BattleScene extends Phaser.Scene {
 
         this.uiTexts.get('angleValue')!.setText(`${currentAngle} deg`);
 
-        if (this.battleMode === 'local-1v1') {
-            this.uiTexts.get('inst1')!.setText('P1: WASD move, CLICK shoot, Q/E cycle, SHIFT build');
-            this.uiTexts.get('inst2')!.setText('P2: IJKL move, O shoot, N/M cycle, U build');
-            this.uiTexts.get('inst3')!.setText('P1: mouse aim | P2 auto-aim to P1');
-            this.uiTexts.get('inst4')!.setText('B + arrows: move P1 build cursor');
+        if (this.isParkourTestMode && !this.hasOpponent) {
+            this.uiTexts.get('inst1')!.setText('Solo Test: WASD move, CLICK shoot, Q/E cycle, SHIFT build');
+            this.uiTexts.get('inst2')!.setText('Muc tieu: giu vi tri, parkour tren map dang truot');
+            this.uiTexts.get('inst3')!.setText('RULE: cham vung do / roi xuong la thua ngay');
+            this.uiTexts.get('inst4')!.setText('Ban block de don duong, luyen movement + aim');
+        } else if (this.battleMode === 'local-1v1') {
+            if (this.isParkourTestMode) {
+                this.uiTexts.get('inst1')!.setText('P1: WASD move, CLICK shoot, Q/E cycle, SHIFT build');
+                this.uiTexts.get('inst2')!.setText('P2: IJKL move, O shoot, N/M cycle, U build');
+                this.uiTexts.get('inst3')!.setText('RULE: Roi xuong vung do hoac het HP la thua');
+                this.uiTexts.get('inst4')!.setText('Map truot xuong lien tuc: vua parkour vua ban pha block');
+            } else {
+                this.uiTexts.get('inst1')!.setText('P1: WASD move, CLICK shoot, Q/E cycle, SHIFT build');
+                this.uiTexts.get('inst2')!.setText('P2: IJKL move, O shoot, N/M cycle, U build');
+                this.uiTexts.get('inst3')!.setText('P1: mouse aim | P2 auto-aim to P1');
+                this.uiTexts.get('inst4')!.setText('B + arrows: move P1 build cursor');
+            }
         }
 
         // Element counts
@@ -1677,7 +1940,11 @@ export class BattleScene extends Phaser.Scene {
             }
 
             const goScore = this.uiTexts.get('goScore')!;
-            goScore.setVisible(true).setText(`Player HP: ${this.player.health}  |  AI HP: ${this.ai.health}`);
+            goScore.setVisible(true).setText(
+                this.hasOpponent
+                    ? `Player HP: ${this.player.health}  |  AI HP: ${this.ai.health}`
+                    : `Player HP: ${this.player.health}  |  Goal: Survive`,
+            );
 
             this.uiTexts.get('goRestart')!.setVisible(true);
         }

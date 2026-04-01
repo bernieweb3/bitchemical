@@ -1,6 +1,9 @@
 // Game constants
 export const GAME_WIDTH = 1600;
 export const GAME_HEIGHT = 900;
+export const CHARACTER_SPRITE_WIDTH = 100;
+export const CHARACTER_SPRITE_HEIGHT = 140;
+export const CHARACTER_CROUCH_SCALE_Y = 0.9;
 
 export const LEFT_ZONE_WIDTH = 520;
 export const CENTER_GAP_WIDTH = 560;
@@ -10,7 +13,7 @@ export const GROUND_HEIGHT = 200;
 
 export const GRAVITY = 800;
 export const JUMP_FORCE = -450;
-export const MOVE_SPEED = 200;
+export const MOVE_SPEED = 230;
 export const PROJECTILE_SPEED = 550;
 export const MAX_HEALTH = 1000;
 export const MAX_MANA = 100;

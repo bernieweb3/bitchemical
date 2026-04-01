@@ -34,6 +34,8 @@ export function GameCanvas({
         const scenes = [BootScene, BattleScene];
         const localBattleMode = gameMode === 'pvp-1v1'
             ? (multiplayerMatch?.team === 'A' ? 'local-1v1-host' : multiplayerMatch?.team === 'B' ? 'local-1v1-client' : 'local-1v1')
+            : gameMode === 'test-vs-ai'
+                ? 'local-1v1'
             : 'vs-ai';
 
         const config: Phaser.Types.Core.GameConfig = {
@@ -48,11 +50,12 @@ export function GameCanvas({
                 arcade: { gravity: { x: 0, y: 0 }, debug: false },
             },
             scale: {
-                mode: Phaser.Scale.FIT,
+                mode: fullViewport ? Phaser.Scale.ENVELOP : Phaser.Scale.FIT,
                 autoCenter: Phaser.Scale.CENTER_BOTH,
             },
             callbacks: {
                 preBoot: (game) => {
+                    game.registry.set('gameMode', gameMode);
                     game.registry.set('selectedElements', selectedElements);
                     game.registry.set('selectedElementImageUrls', selectedElementImageUrls);
                     game.registry.set('syncedLoadoutsByPlayer', syncedLoadoutsByPlayer);
@@ -101,11 +104,13 @@ export function GameCanvas({
             style={{
                 width: '100%',
                 maxWidth: fullViewport ? '100vw' : GAME_WIDTH,
-                height: fullViewport ? '100vh' : 'auto',
+                height: fullViewport ? '100dvh' : 'auto',
+                minHeight: fullViewport ? '100dvh' : undefined,
                 aspectRatio: fullViewport ? undefined : `${GAME_WIDTH}/${GAME_HEIGHT}`,
                 margin: '0 auto',
                 borderRadius: fullViewport ? '0' : '12px',
                 overflow: 'hidden',
+                touchAction: 'none',
                 boxShadow: '0 0 40px rgba(76, 175, 80, 0.15), 0 0 80px rgba(0,0,0,0.6)',
                 border: fullViewport ? '0' : '2px solid rgba(76, 175, 80, 0.2)',
             }}

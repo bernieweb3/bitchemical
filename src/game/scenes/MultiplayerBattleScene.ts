@@ -1,5 +1,12 @@
 import Phaser from 'phaser';
-import { GAME_HEIGHT, GAME_WIDTH, PLATFORMS } from '../config';
+import {
+    GAME_HEIGHT,
+    GAME_WIDTH,
+    PLATFORMS,
+    CHARACTER_SPRITE_WIDTH,
+    CHARACTER_SPRITE_HEIGHT,
+    CHARACTER_CROUCH_SCALE_Y,
+} from '../config';
 import { getMatchSocket } from '../../network/matchSocket';
 import { ELEMENTS } from '../data/elements';
 
@@ -434,7 +441,8 @@ export class MultiplayerBattleScene extends Phaser.Scene {
                 Phaser.Math.Linear(currentX, targetX, 0.55),
                 Phaser.Math.Linear(currentY, targetY, 0.55),
             );
-            sprite.setDisplaySize(92, (p.crouching ? 117 : 130));
+            const spriteScaleY = p.crouching ? CHARACTER_CROUCH_SCALE_Y : 1;
+            sprite.setDisplaySize(CHARACTER_SPRITE_WIDTH, CHARACTER_SPRITE_HEIGHT * spriteScaleY);
             sprite.setFlipX(!p.facingRight);
 
             const prev = this.lastPlayerPositions.get(p.id);

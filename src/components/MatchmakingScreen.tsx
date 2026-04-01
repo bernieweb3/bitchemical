@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { GameMode } from '../types/gameMode';
 
+type MatchmakingMode = Exclude<GameMode, 'vs-ai' | 'test-vs-ai'>;
+
 type TeamId = 'A' | 'B';
 
 export interface MatchedPlayer {
@@ -11,14 +13,14 @@ export interface MatchedPlayer {
 
 export interface MatchFoundPayload {
     roomId: string;
-    mode: Exclude<GameMode, 'vs-ai'>;
+    mode: MatchmakingMode;
     playerId: string;
     team: TeamId;
     players: MatchedPlayer[];
 }
 
 interface MatchmakingScreenProps {
-    mode: Exclude<GameMode, 'vs-ai'>;
+    mode: MatchmakingMode;
     nickname: string;
     onBack: () => void;
     onMatched: (payload: MatchFoundPayload) => void;
@@ -31,7 +33,7 @@ interface RoomMember {
 
 interface RoomStatePayload {
     roomCode: string;
-    mode: Exclude<GameMode, 'vs-ai'>;
+    mode: MatchmakingMode;
     hostId: string;
     members: RoomMember[];
     requiredPlayers: number;
@@ -40,20 +42,20 @@ interface RoomStatePayload {
 
 type MatchView = 'select' | 'queue' | 'room';
 
-const MODE_LABEL: Record<Exclude<GameMode, 'vs-ai'>, string> = {
+const MODE_LABEL: Record<MatchmakingMode, string> = {
     'pvp-1v1': 'PVP 1v1',
 };
 
 interface QueueEntry {
     id: string;
     name: string;
-    mode: Exclude<GameMode, 'vs-ai'>;
+    mode: MatchmakingMode;
     joinedAt: number;
 }
 
 interface LocalRoom {
     roomCode: string;
-    mode: Exclude<GameMode, 'vs-ai'>;
+    mode: MatchmakingMode;
     hostId: string;
     members: RoomMember[];
     requiredPlayers: number;
@@ -62,7 +64,7 @@ interface LocalRoom {
 
 interface MatchFoundEvent {
     roomId: string;
-    mode: Exclude<GameMode, 'vs-ai'>;
+    mode: MatchmakingMode;
     players: MatchedPlayer[];
 }
 

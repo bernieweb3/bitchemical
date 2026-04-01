@@ -14,7 +14,12 @@ const ARENA = {
 
 const PLAYER_WIDTH = 30;
 const PLAYER_HEIGHT = 46;
-const PLAYER_SPEED = 200;
+const PLAYER_SPEED = 230;
+const PLAYER_CROUCH_MOVE_SCALE = 0.55;
+const PLAYER_GROUND_ACCEL = 1800;
+const PLAYER_AIR_ACCEL = 950;
+const PLAYER_GROUND_DECEL = 2400;
+const PLAYER_AIR_DECEL = 700;
 const PLAYER_JUMP_FORCE = -450;
 const PLAYER_GRAVITY = 800;
 const SHOT_SPEED = 550;
@@ -139,6 +144,12 @@ function getNearestEnemy(players, self) {
         }
     }
     return nearest;
+}
+
+function approach(current, target, maxDelta) {
+    if (current < target) return Math.min(current + maxDelta, target);
+    if (current > target) return Math.max(current - maxDelta, target);
+    return target;
 }
 
 function hsvToHex(h, s, v) {
@@ -448,12 +459,16 @@ function updateRoom(room, dtMs) {
             p.selectedElement = p.input.selectedElement;
         }
 
-        if (p.input.left) {
-            p.vx = -PLAYER_SPEED;
-        }
-        if (p.input.right) {
-            p.vx = PLAYER_SPEED;
-        }
+        const moveInputX = (p.input.right ? 1 : 0) - (p.input.left ? 1 : 0);
+        const moveSpeedScale = p.crouching ? PLAYER_CROUCH_MOVE_SCALE : 1;
+        const targetVx = moveInputX * PLAYER_SPEED * moveSpeedScale;
+        const accel = p.onGround ? PLAYER_GROUND_ACCEL : PLAYER_AIR_ACCEL;
+        const decel = p.onGround ? PLAYER_GROUND_DECEL : PLAYER_AIR_DECEL;
+        const rate = moveInputX === 0 ? decel : accel;
+        p.vx = approach(p.vx, targetVx, rate * (dtMs / 1000));
+
+        if (moveInputX > 0) p.facingRight = true;
+        else if (moveInputX < 0) p.facingRight = false;
 
         if (p.input.up && p.onGround) {
             p.vy = PLAYER_JUMP_FORCE;
@@ -495,11 +510,12 @@ function updateRoom(room, dtMs) {
 
         p.x = Math.max(0, Math.min(ARENA.width - p.w, p.x));
         p.y = Math.max(0, Math.min(ARENA.height - p.h, p.y));
-        p.vx *= 0.85;
 
-        const nearestEnemy = getNearestEnemy(room.players, p);
-        if (nearestEnemy) {
-            p.facingRight = (nearestEnemy.x + nearestEnemy.w / 2) >= (p.x + p.w / 2);
+        if (moveInputX === 0 && p.isBot) {
+            const nearestEnemy = getNearestEnemy(room.players, p);
+            if (nearestEnemy) {
+                p.facingRight = (nearestEnemy.x + nearestEnemy.w / 2) >= (p.x + p.w / 2);
+            }
         }
 
         if (p.input.build && now - p.lastBuildAt >= BLOCK_PLACE_COOLDOWN_MS && p.mana >= BLOCK_COST_MANA) {
@@ -532,6 +548,9 @@ function updateRoom(room, dtMs) {
         }
 
         if (p.input.shoot && now - p.lastShotAt >= SHOT_COOLDOWN_MS && p.mana >= SHOT_COST_MANA) {
+            if (moveInputX > 0) p.facingRight = true;
+            else if (moveInputX < 0) p.facingRight = false;
+            else p.facingRight = p.input.aimX >= (p.x + p.w / 2);
             const muzzle = getGunMuzzlePosition(p);
             const angle = getAimAngleDeg(p, p.input.aimX, p.input.aimY);
             const rad = (angle * Math.PI) / 180;

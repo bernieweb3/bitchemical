@@ -511,6 +511,10 @@
     background: linear-gradient(160deg, #5fa4ff, #2f71d5);
 }
 
+.mode-test {
+    background: linear-gradient(160deg, #60c87b, #2f945a);
+}
+
 .mode-squad {
     background: linear-gradient(160deg, #ff5e5e, #c42f44);
 }
